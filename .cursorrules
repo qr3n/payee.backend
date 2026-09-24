@@ -1,0 +1,9 @@
+# Cursor AI Rules
+# Single source of truth: AGENTS.md
+
+Always refer to and strictly follow [AGENTS.md](AGENTS.md) for:
+- System Architecture (Vertical Slice / Modular Monolith in `services/api/app/modules/`)
+- Unit of work and transaction rules (no `commit()` in services)
+- Git & Atomic Commits Protocol (commit after each milestone: Schema -> Service -> Router -> Tasks)
+- Verification Quality Gate (`make format && make check` before every commit)
+- Conventional Commits (`feat(scope): ...`, `fix(scope): ...`)

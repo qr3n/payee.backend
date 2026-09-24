@@ -1,0 +1,165 @@
+services:
+  traefik:
+    image: traefik:v3.7
+    container_name: traefik_prod
+    command:
+      - "--configfile=/etc/traefik/traefik.yml"
+    ports:
+      - "80:80"
+      - "443:443"
+    volumes:
+      - /var/run/docker.sock:/var/run/docker.sock:ro
+      - ./infra/traefik/traefik.prod.yml:/etc/traefik/traefik.yml:ro
+      - ./infra/traefik/dynamic:/etc/traefik/dynamic:ro
+      - traefik_acme:/etc/traefik/acme
+    environment:
+      - ACME_EMAIL=${ACME_EMAIL:-admin@example.com}
+    env_file:
+      - path: .env
+        required: false
+    networks:
+      - gateway
+    restart: always
+
+  postgres:
+    image: postgres:17-alpine
+    container_name: postgres_prod
+    environment:
+      POSTGRES_DB: ${POSTGRES_DB:-app}
+      POSTGRES_USER: ${POSTGRES_USER:-postgres}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-postgres}
+    volumes:
+      - postgres_prod_data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER:-postgres} -d ${POSTGRES_DB:-app}"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+    networks:
+      - gateway
+    restart: always
+
+  redis:
+    image: redis:7-alpine
+    container_name: redis_prod
+    command: ["redis-server", "--appendonly", "yes"]
+    volumes:
+      - redis_prod_data:/data
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 10s
+      timeout: 3s
+      retries: 5
+    networks:
+      - gateway
+    restart: always
+
+  migration:
+    build:
+      context: ./services/api
+      dockerfile: Dockerfile
+      target: production
+    image: fastapi-template-api:prod
+    container_name: fastapi_migration_prod
+    command: ["alembic", "upgrade", "head"]
+    depends_on:
+      postgres:
+        condition: service_healthy
+    environment:
+      - ENVIRONMENT=production
+      - RUN_MIGRATIONS=false
+      - POSTGRES_SERVER=postgres
+      - POSTGRES_PORT=5432
+      - POSTGRES_USER=${POSTGRES_USER:-postgres}
+      - POSTGRES_PASSWORD=${POSTGRES_PASSWORD:-postgres}
+      - POSTGRES_DB=${POSTGRES_DB:-app}
+    env_file:
+      - path: .env
+        required: false
+    networks:
+      - gateway
+    restart: "no"
+
+  api:
+    build:
+      context: ./services/api
+      dockerfile: Dockerfile
+      target: production
+    image: fastapi-template-api:prod
+    container_name: fastapi_api_prod
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    environment:
+      - ENVIRONMENT=production
+      - DEBUG=false
+      - RUN_MIGRATIONS=false
+      - GRANIAN_WORKERS=4
+      - GRANIAN_LOG_ACCESS_ENABLED=true
+      - POSTGRES_SERVER=postgres
+      - POSTGRES_PORT=5432
+      - POSTGRES_USER=${POSTGRES_USER:-postgres}
+      - POSTGRES_PASSWORD=${POSTGRES_PASSWORD:-postgres}
+      - POSTGRES_DB=${POSTGRES_DB:-app}
+      - REDIS_HOST=redis
+      - REDIS_PORT=6379
+    env_file:
+      - path: .env
+        required: false
+    labels:
+      - "traefik.enable=true"
+      - "traefik.http.routers.api.rule=Host(`${API_HOST:-api.example.com}`)"
+      - "traefik.http.routers.api.entrypoints=websecure"
+      - "traefik.http.routers.api.tls=true"
+      - "traefik.http.routers.api.tls.certresolver=letsencrypt"
+      - "traefik.http.routers.api.middlewares=compress@file,security-headers@file,api-ratelimit@file"
+      - "traefik.http.services.api.loadbalancer.server.port=8000"
+    networks:
+      - gateway
+    restart: always
+
+  worker:
+    build:
+      context: ./services/api
+      dockerfile: Dockerfile
+      target: production
+    image: fastapi-template-api:prod
+    container_name: fastapi_worker_prod
+    command: ["taskiq", "worker", "app.core.broker:broker", "--fs-discover", "--workers", "2"]
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    environment:
+      - ENVIRONMENT=production
+      - DEBUG=false
+      - RUN_MIGRATIONS=false
+      - POSTGRES_SERVER=postgres
+      - POSTGRES_PORT=5432
+      - POSTGRES_USER=${POSTGRES_USER:-postgres}
+      - POSTGRES_PASSWORD=${POSTGRES_PASSWORD:-postgres}
+      - POSTGRES_DB=${POSTGRES_DB:-app}
+      - REDIS_HOST=redis
+      - REDIS_PORT=6379
+    env_file:
+      - path: .env
+        required: false
+    networks:
+      - gateway
+    restart: always
+
+volumes:
+  traefik_acme:
+    name: fastapi_traefik_acme
+  postgres_prod_data:
+    name: fastapi_postgres_prod_data
+  redis_prod_data:
+    name: fastapi_redis_prod_data
+
+networks:
+  gateway:
+    name: gateway
+    driver: bridge

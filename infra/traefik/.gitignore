@@ -1,0 +1,3 @@
+# Ignore acme certificates
+acme/
+*.json

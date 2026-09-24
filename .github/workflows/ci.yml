@@ -1,0 +1,88 @@
+name: CI
+
+on:
+  push:
+    branches: [main, master]
+  pull_request:
+    branches: [main, master]
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  lint:
+    name: Code Quality & Type Check
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@v5
+        with:
+          enable-cache: true
+          cache-dependency-glob: "services/api/uv.lock"
+
+      - name: Set up Python
+        run: uv python install 3.12
+
+      - name: Install dependencies
+        run: uv sync --directory services/api --frozen
+
+      - name: Run Ruff Linter
+        run: uv run --directory services/api ruff check .
+
+      - name: Check Formatting with Ruff
+        run: uv run --directory services/api ruff format --check .
+
+      - name: Type check with Mypy
+        run: uv run --directory services/api mypy app tests
+
+  test:
+    name: Tests (Python ${{ matrix.python-version }})
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        python-version: ["3.12", "3.13"]
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@v5
+        with:
+          enable-cache: true
+          cache-dependency-glob: "services/api/uv.lock"
+
+      - name: Set up Python ${{ matrix.python-version }}
+        run: uv python install ${{ matrix.python-version }}
+
+      - name: Install dependencies
+        run: uv sync --directory services/api --frozen
+
+      - name: Run tests with Pytest
+        run: uv run --directory services/api pytest -v --maxfail=1
+
+  docker:
+    name: Docker Compose & Image Builds
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Validate Docker Compose (Development)
+        run: docker compose config > /dev/null
+
+      - name: Validate Docker Compose (Production)
+        run: docker compose -f docker-compose.prod.yml config > /dev/null
+
+      - name: Build Development Images
+        run: docker compose build
+
+      - name: Build Production Images
+        run: docker compose -f docker-compose.prod.yml build

@@ -1,0 +1,143 @@
+services:
+  traefik:
+    image: traefik:v3.7
+    container_name: traefik_dev
+    command:
+      - "--configfile=/etc/traefik/traefik.yml"
+    ports:
+      - "80:80"
+      - "${TRAEFIK_DASHBOARD_PORT:-8080}:8080"
+    volumes:
+      - /var/run/docker.sock:/var/run/docker.sock:ro
+      - ./infra/traefik/traefik.yml:/etc/traefik/traefik.yml:ro
+      - ./infra/traefik/dynamic:/etc/traefik/dynamic:ro
+    env_file:
+      - path: .env
+        required: false
+    networks:
+      - gateway
+    restart: unless-stopped
+
+  postgres:
+    image: postgres:17-alpine
+    container_name: postgres_dev
+    environment:
+      POSTGRES_DB: ${POSTGRES_DB:-app}
+      POSTGRES_USER: ${POSTGRES_USER:-postgres}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-postgres}
+    ports:
+      - "${POSTGRES_PORT:-5432}:5432"
+    volumes:
+      - postgres_dev_data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER:-postgres} -d ${POSTGRES_DB:-app}"]
+      interval: 5s
+      timeout: 5s
+      retries: 5
+    networks:
+      - gateway
+    restart: unless-stopped
+
+  redis:
+    image: redis:7-alpine
+    container_name: redis_dev
+    command: ["redis-server", "--appendonly", "yes"]
+    ports:
+      - "${REDIS_PORT:-6379}:6379"
+    volumes:
+      - redis_dev_data:/data
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 3s
+      retries: 5
+    networks:
+      - gateway
+    restart: unless-stopped
+
+  api:
+    build:
+      context: ./services/api
+      dockerfile: Dockerfile
+      target: development
+    image: fastapi-template-api:dev
+    container_name: fastapi_api_dev
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    ports:
+      - "${PORT:-8000}:8000"
+    volumes:
+      # Mount local app directory for hot-reloading in development
+      - ./services/api/app:/app/app:ro
+    environment:
+      - ENVIRONMENT=development
+      - DEBUG=true
+      - RUN_MIGRATIONS=true
+      - GRANIAN_RELOAD=true
+      - GRANIAN_LOG_ACCESS_ENABLED=true
+      - POSTGRES_SERVER=postgres
+      - POSTGRES_PORT=5432
+      - POSTGRES_USER=${POSTGRES_USER:-postgres}
+      - POSTGRES_PASSWORD=${POSTGRES_PASSWORD:-postgres}
+      - POSTGRES_DB=${POSTGRES_DB:-app}
+      - REDIS_HOST=redis
+      - REDIS_PORT=6379
+    env_file:
+      - path: .env
+        required: false
+    labels:
+      - "traefik.enable=true"
+      - "traefik.http.routers.api.rule=Host(`${API_HOST:-api.localhost}`)"
+      - "traefik.http.routers.api.entrypoints=web"
+      - "traefik.http.routers.api.middlewares=compress@file,security-headers@file,api-ratelimit@file"
+      - "traefik.http.services.api.loadbalancer.server.port=8000"
+    networks:
+      - gateway
+    restart: unless-stopped
+
+  worker:
+    build:
+      context: ./services/api
+      dockerfile: Dockerfile
+      target: development
+    image: fastapi-template-api:dev
+    container_name: fastapi_worker_dev
+    command: ["taskiq", "worker", "app.core.broker:broker", "--fs-discover", "--reload"]
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    volumes:
+      - ./services/api/app:/app/app:ro
+    environment:
+      - ENVIRONMENT=development
+      - DEBUG=true
+      - RUN_MIGRATIONS=false
+      - POSTGRES_SERVER=postgres
+      - POSTGRES_PORT=5432
+      - POSTGRES_USER=${POSTGRES_USER:-postgres}
+      - POSTGRES_PASSWORD=${POSTGRES_PASSWORD:-postgres}
+      - POSTGRES_DB=${POSTGRES_DB:-app}
+      - REDIS_HOST=redis
+      - REDIS_PORT=6379
+    env_file:
+      - path: .env
+        required: false
+    networks:
+      - gateway
+    restart: unless-stopped
+
+volumes:
+  postgres_dev_data:
+    name: fastapi_postgres_dev_data
+  redis_dev_data:
+    name: fastapi_redis_dev_data
+
+networks:
+  gateway:
+    name: gateway
+    driver: bridge

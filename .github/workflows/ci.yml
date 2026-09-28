@@ -22,22 +22,31 @@ jobs:
         uses: astral-sh/setup-uv@v5
         with:
           enable-cache: true
-          cache-dependency-glob: "services/api/uv.lock"
+          cache-dependency-glob: "services/*/uv.lock"
 
       - name: Set up Python
         run: uv python install 3.12
 
-      - name: Install dependencies
-        run: uv sync --directory services/api --frozen
+      - name: Install dependencies (API & Bot)
+        run: |
+          uv sync --directory services/api --frozen
+          uv sync --directory services/bot --frozen
 
-      - name: Run Ruff Linter
-        run: uv run --directory services/api ruff check .
+      - name: Run Ruff Linter & Formatter (API)
+        run: |
+          uv run --directory services/api ruff check .
+          uv run --directory services/api ruff format --check .
 
-      - name: Check Formatting with Ruff
-        run: uv run --directory services/api ruff format --check .
-
-      - name: Type check with Mypy
+      - name: Type check with Mypy (API)
         run: uv run --directory services/api mypy app tests
+
+      - name: Run Ruff Linter & Formatter (Bot)
+        run: |
+          uv run --directory services/bot ruff check .
+          uv run --directory services/bot ruff format --check .
+
+      - name: Type check with Mypy (Bot)
+        run: uv run --directory services/bot mypy bot tests
 
   test:
     name: Tests (Python ${{ matrix.python-version }})
@@ -54,20 +63,28 @@ jobs:
         uses: astral-sh/setup-uv@v5
         with:
           enable-cache: true
-          cache-dependency-glob: "services/api/uv.lock"
+          cache-dependency-glob: "services/*/uv.lock"
 
       - name: Set up Python ${{ matrix.python-version }}
         run: uv python install ${{ matrix.python-version }}
 
-      - name: Install dependencies
-        run: uv sync --directory services/api --frozen
+      - name: Install dependencies (API & Bot)
+        run: |
+          uv sync --directory services/api --frozen
+          uv sync --directory services/bot --frozen
 
-      - name: Run tests with Pytest
+      - name: Run tests with Pytest (API)
         run: uv run --directory services/api pytest -v --maxfail=1
+
+      - name: Run tests with Pytest (Bot)
+        run: uv run --directory services/bot pytest -v --maxfail=1
 
   docker:
     name: Docker Compose & Image Builds
     runs-on: ubuntu-latest
+    env:
+      TELEGRAM_BOT_TOKEN: "1234567890:ci_dummy_token"
+      TELEGRAM_WEBHOOK_SECRET: "ci_dummy_webhook_secret"
     steps:
       - name: Checkout repository
         uses: actions/checkout@v4

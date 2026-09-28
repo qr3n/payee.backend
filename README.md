@@ -12,6 +12,7 @@
 - **Кэш & In-memory хранилище:** [Redis 7](https://redis.io/) с официальным клиентом `redis.asyncio`, C-парсером [hiredis](https://github.com/redis/hiredis-py) и встроенным Connection Pool
 - **Миграции БД:** [Alembic](https://alembic.sqlalchemy.org/) (асинхронная автогенерация миграций)
 - **Валидация и конфиг:** [Pydantic v2](https://docs.pydantic.dev/) & [pydantic-settings](https://docs.pydantic.dev/latest/concepts/pydantic_settings/)
+- **Telegram Bot:** [aiogram 3](https://docs.aiogram.dev/) & [aiogram-dialog](https://aiogram-dialog.readthedocs.io/) — современный декларативный бот-фронтенд (BFF-паттерн, FSM в Redis, Polling в Dev, Webhook через Traefik в Prod)
 - **Управление зависимостями:** [uv](https://docs.astral.sh/uv/) — сверхбыстрый пакетный менеджер нового поколения на Rust (заменяет Poetry/pip)
 - **Качество кода и тесты:** [pytest](https://docs.pytest.org/), [httpx](https://www.python-httpx.org/), [fakeredis](https://github.com/cunla/fakeredis-py), [Ruff](https://docs.astral.sh/ruff/) (линтер и форматтер), [Mypy](https://mypy-lang.org/)
 - **Контейнеризация:** Docker (Multi-stage build с кэшированием uv) & Docker Compose (dev и prod профили)
@@ -98,6 +99,29 @@ fastapi-backend-template/
                 └── v1/
                     ├── __init__.py
                     └── router.py # Агрегатор роутеров доменных модулей
+    └── bot/                    # 🤖 Микросервис Telegram-бота (aiogram 3 + aiogram-dialog)
+        ├── Dockerfile          # Многоэтапный Dockerfile (base -> builder -> dev / prod с uv)
+        ├── .dockerignore       # Исключения для сборки контейнера
+        ├── pyproject.toml      # Зависимости и конфигурация сервиса (uv / PEP 621)
+        ├── uv.lock             # Зафиксированные версии пакетов (uv)
+        ├── scripts/
+        │   └── entrypoint.sh   # Скрипт точки входа контейнера
+        ├── tests/              # Набор тестов (pytest + mock client + fakedialogs)
+        │   ├── __init__.py
+        │   ├── conftest.py     # Фикстуры
+        │   ├── test_client.py  # Тесты типизированного HTTP-клиента к API
+        │   ├── test_dialogs.py # Тесты геттеров и стейтов aiogram-dialog
+        │   ├── test_handlers.py# Тесты команд (/start, /menu, /help)
+        │   └── test_webhook.py # Тесты вебхук-сервера и healthcheck
+        └── bot/                # Исходный код бота
+            ├── __init__.py
+            ├── main.py         # Единая точка входа (Polling в Dev / Webhook в Prod)
+            ├── core/           # Конфигурация (pydantic-settings), логирование, RedisStorage
+            ├── client/         # Асинхронный HTTP-клиент (httpx) к FastAPI
+            ├── dialogs/        # Интерактивные меню и формы aiogram-dialog
+            ├── handlers/       # Обработчики команд Telegram
+            ├── middlewares/    # Внедрение ApiClientMiddleware и LoggingMiddleware
+            └── webhook/        # Webhook-сервер aiohttp для production
 ```
 
 ---
@@ -109,11 +133,13 @@ fastapi-backend-template/
 | Команда | Описание |
 |---|---|
 | `make help` | Справка по всем доступным командам |
-| `make dev` | Запуск локального сервера разработки Granian (`--reload`) |
-| `make test` | Запуск тестов через `pytest` |
-| `make lint` | Проверка кода линтером Ruff и проверка типов Mypy |
-| `make format` | Форматирование кода и автоисправление линтером |
-| `make check` | Полная проверка качества кода (`lint` + `test`) |
+| `make dev` | Запуск локального сервера API Granian (`--reload`) |
+| `make worker` | Запуск фонового воркера Taskiq (`--reload`) |
+| `make bot-dev` | Запуск локального Telegram-бота в режиме polling |
+| `make test` | Запуск тестов для всех сервисов (`test-api` + `test-bot`) |
+| `make lint` | Проверка линтером Ruff и типами Mypy для всех сервисов |
+| `make format` | Форматирование кода и автоисправление во всех сервисах |
+| `make check` | Полная проверка качества кода (`lint` + `test`) для всех сервисов |
 | `make migrate` | Применение миграций базы данных (`alembic upgrade head`) |
 | `make migration m="msg"` | Создание новой автогенерируемой миграции Alembic |
 | `make downgrade` | Откат базы данных на 1 ревизию назад |
@@ -188,6 +214,38 @@ docker compose -f docker-compose.prod.yml up --build -d
 - Включены заголовки безопасности (HSTS, XSS Protection, Frame Options) и gzip-сжатие.
 - Приложение API запускается из-под непривилегированного пользователя `appuser` (UID 10001).
 - Granian запущен в многопроцессном режиме (`--workers 4`).
+
+---
+
+## 🤖 Микросервис Telegram-бота (`services/bot`)
+
+В проект интегрирован production-ready шаблон Telegram-бота на базе **aiogram 3** и **aiogram-dialog**.
+
+### 🏛️ Архитектурные принципы:
+1. **API как единый источник правды (Single Source of Truth, SSOT):**
+   - Бот **не обращается к базе данных PostgreSQL напрямую** и не дублирует доменные модели и миграции.
+   - Все операции с данными (получение списка элементов, просмотр деталей, создание новых записей, запуск аналитических задач Taskiq) бот выполняет через асинхронный типизированный HTTP-клиент (`bot.client.ApiClient` на базе `httpx`) к FastAPI бэкенду (`API_BASE_URL`).
+   - Это гарантирует, что бизнес-логика, валидация, аутентификация и аудит централизованы в одном месте.
+2. **Изоляция хранилища Redis:**
+   - **Для бота:** Redis используется **исключительно** для персистентности FSM-состояний и стеков окон диалогов (`RedisStorage` с изолированным индексом БД `REDIS_FSM_DB=1` и префиксом ключей `fsm:`).
+   - **Для API:** Бизнес-кэш (`CacheService`) и очереди сообщений Taskiq живут в `REDIS_DB=0`.
+3. **Два режима работы (Dev / Prod):**
+   - **Development (`TELEGRAM_BOT_MODE=polling`):** Бот работает через long-polling. Не требуется белый IP-адрес, валидный SSL-сертификат или туннелирование через ngrok. Запуск: `make bot-dev` или через Docker Compose (`docker compose up bot`).
+   - **Production (`TELEGRAM_BOT_MODE=webhook`):** Бот разворачивается как `aiohttp` веб-сервер за Traefik v3. Traefik обеспечивает SSL-терминацию (HTTPS Let's Encrypt), а запросы от Telegram защищены секретным токеном (`X-Telegram-Bot-Api-Secret-Token`). Сервис предоставляет эндпоинт `/health` для Docker/Traefik healthcheck.
+4. **Реактивные диалоги (aiogram-dialog):**
+   - Декларативное управление окнами интерфейса: каталог элементов с навигацией и постраничным скроллингом (`ScrollingGroup`), форма пошагового создания элемента (`TextInput`), карточка элемента и запуск фонового воркера Taskiq прямо из Telegram.
+
+### 🚀 Запуск бота:
+```bash
+# 1. Задайте токен от @BotFather в .env
+TELEGRAM_BOT_TOKEN="1234567890:your_actual_token"
+
+# 2. Локальный запуск в режиме Polling (с хот-релоадом API):
+make bot-dev
+
+# 3. Или запуск всех сервисов в Docker (Dev):
+make up
+```
 
 ---
 

@@ -88,6 +88,11 @@ services:
     env_file:
       - path: .env
         required: false
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8000/health')"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
     labels:
       - "traefik.enable=true"
       - "traefik.http.routers.api.rule=Host(`${API_HOST:-api.localhost}`)"
@@ -124,6 +129,39 @@ services:
       - POSTGRES_DB=${POSTGRES_DB:-app}
       - REDIS_HOST=redis
       - REDIS_PORT=6379
+    env_file:
+      - path: .env
+        required: false
+    networks:
+      - gateway
+    restart: unless-stopped
+
+  bot:
+    build:
+      context: ./services/bot
+      dockerfile: Dockerfile
+      target: development
+    image: fastapi-template-bot:dev
+    container_name: fastapi_bot_dev
+    depends_on:
+      api:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    volumes:
+      # Mount local bot directory for hot-reloading in development
+      - ./services/bot/bot:/app/bot:ro
+    environment:
+      - ENVIRONMENT=development
+      - DEBUG=true
+      - TELEGRAM_BOT_TOKEN=${TELEGRAM_BOT_TOKEN:-1234567890:mock_token_for_dev}
+      - TELEGRAM_BOT_MODE=${TELEGRAM_BOT_MODE:-polling}
+      - TELEGRAM_DROP_PENDING_UPDATES=true
+      - API_BASE_URL=http://api:8000
+      - REDIS_HOST=redis
+      - REDIS_PORT=6379
+      - REDIS_PASSWORD=${REDIS_PASSWORD:-}
+      - REDIS_FSM_DB=1
     env_file:
       - path: .env
         required: false

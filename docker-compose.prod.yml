@@ -108,6 +108,11 @@ services:
     env_file:
       - path: .env
         required: false
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8000/health')"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
     labels:
       - "traefik.enable=true"
       - "traefik.http.routers.api.rule=Host(`${API_HOST:-api.example.com}`)"
@@ -147,6 +152,46 @@ services:
     env_file:
       - path: .env
         required: false
+    networks:
+      - gateway
+    restart: always
+
+  bot:
+    build:
+      context: ./services/bot
+      dockerfile: Dockerfile
+      target: production
+    image: fastapi-template-bot:prod
+    container_name: fastapi_bot_prod
+    depends_on:
+      api:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    environment:
+      - ENVIRONMENT=production
+      - DEBUG=false
+      - TELEGRAM_BOT_TOKEN=${TELEGRAM_BOT_TOKEN}
+      - TELEGRAM_BOT_MODE=${TELEGRAM_BOT_MODE:-webhook}
+      - TELEGRAM_WEBHOOK_URL=${TELEGRAM_WEBHOOK_URL:-https://${BOT_HOST:-bot.example.com}/webhook}
+      - TELEGRAM_WEBHOOK_SECRET=${TELEGRAM_WEBHOOK_SECRET}
+      - TELEGRAM_DROP_PENDING_UPDATES=true
+      - API_BASE_URL=http://api:8000
+      - REDIS_HOST=redis
+      - REDIS_PORT=6379
+      - REDIS_PASSWORD=${REDIS_PASSWORD:-}
+      - REDIS_FSM_DB=1
+    env_file:
+      - path: .env
+        required: false
+    labels:
+      - "traefik.enable=true"
+      - "traefik.http.routers.bot.rule=Host(`${BOT_HOST:-bot.example.com}`)"
+      - "traefik.http.routers.bot.entrypoints=websecure"
+      - "traefik.http.routers.bot.tls=true"
+      - "traefik.http.routers.bot.tls.certresolver=letsencrypt"
+      - "traefik.http.routers.bot.middlewares=compress@file,security-headers@file"
+      - "traefik.http.services.bot.loadbalancer.server.port=8080"
     networks:
       - gateway
     restart: always

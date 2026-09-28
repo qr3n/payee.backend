@@ -1,5 +1,5 @@
 .DEFAULT_GOAL := help
-.PHONY: help dev worker test lint format check openapi migrate migration downgrade up down logs build clean
+.PHONY: help dev worker bot-dev test test-api test-bot lint lint-api lint-bot format format-api format-bot check openapi migrate migration downgrade up down logs build clean
 
 # Colors for terminal output
 BLUE  := \033[36m
@@ -19,19 +19,39 @@ dev: ## Run local development server with hot-reload (Granian + uvloop)
 worker: ## Run local background worker process with hot-reload (Taskiq)
 	uv run --directory services/api taskiq worker app.core.broker:broker --fs-discover --reload
 
+bot-dev: ## Run local Telegram bot in polling mode (aiogram + aiogram-dialog)
+	uv run --directory services/bot python -m bot.main
+
 # --- Testing & Quality Assurance ---
-test: ## Run unit and integration tests (pytest)
+test-api: ## Run API tests (pytest)
 	uv run --directory services/api pytest
 
-lint: ## Run code linter (Ruff) and type checker (Mypy)
+test-bot: ## Run Telegram Bot tests (pytest)
+	uv run --directory services/bot pytest
+
+test: test-api test-bot ## Run all unit and integration tests for all services
+
+lint-api: ## Run API linter (Ruff) and type checker (Mypy)
 	uv run --directory services/api ruff check .
 	uv run --directory services/api mypy app tests
 
-format: ## Format code and auto-fix linting issues (Ruff)
+lint-bot: ## Run Telegram Bot linter (Ruff) and type checker (Mypy)
+	uv run --directory services/bot ruff check .
+	uv run --directory services/bot mypy bot tests
+
+lint: lint-api lint-bot ## Run code linter and type checker across all services
+
+format-api: ## Format API code and auto-fix linting issues (Ruff)
 	uv run --directory services/api ruff format .
 	uv run --directory services/api ruff check --fix .
 
-check: lint test ## Run all checks (linter, type checker, and tests)
+format-bot: ## Format Telegram Bot code and auto-fix linting issues (Ruff)
+	uv run --directory services/bot ruff format .
+	uv run --directory services/bot ruff check --fix .
+
+format: format-api format-bot ## Format code across all services (API & Bot)
+
+check: lint test ## Run all checks (linter, type checker, and tests) across all services
 
 openapi: ## Export current FastAPI OpenAPI specification to openapi.json
 	@uv run --directory services/api python -c "import json; from app.main import app; print(json.dumps(app.openapi(), indent=2))" > openapi.json

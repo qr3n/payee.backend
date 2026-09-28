@@ -12,6 +12,8 @@ workflow:
 
 variables:
   UV_CACHE_DIR: "$CI_PROJECT_DIR/.uv-cache"
+  TELEGRAM_BOT_TOKEN: "1234567890:ci_dummy_token"
+  TELEGRAM_WEBHOOK_SECRET: "ci_dummy_webhook_secret"
 
 # ==============================================================================
 # Reusable base template for Python / uv jobs
@@ -22,10 +24,12 @@ variables:
     key:
       files:
         - services/api/uv.lock
+        - services/bot/uv.lock
     paths:
       - .uv-cache
   before_script:
     - uv sync --directory services/api --frozen
+    - uv sync --directory services/bot --frozen
 
 # ==============================================================================
 # Stage: Lint & Code Quality
@@ -36,12 +40,15 @@ lint:code-quality:
   script:
     - uv run --directory services/api ruff check .
     - uv run --directory services/api ruff format --check .
+    - uv run --directory services/bot ruff check .
+    - uv run --directory services/bot ruff format --check .
 
 lint:type-check:
   extends: .python-base
   stage: lint
   script:
     - uv run --directory services/api mypy app tests
+    - uv run --directory services/bot mypy bot tests
 
 # ==============================================================================
 # Stage: Automated Tests
@@ -51,6 +58,7 @@ test:python-3.12:
   stage: test
   script:
     - uv run --directory services/api pytest -v --maxfail=1
+    - uv run --directory services/bot pytest -v --maxfail=1
 
 test:python-3.13:
   extends: .python-base
@@ -58,6 +66,7 @@ test:python-3.13:
   image: ghcr.io/astral-sh/uv:python3.13-bookworm-slim
   script:
     - uv run --directory services/api pytest -v --maxfail=1
+    - uv run --directory services/bot pytest -v --maxfail=1
 
 # ==============================================================================
 # Stage: Docker Compose & Image Builds

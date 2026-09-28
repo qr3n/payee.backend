@@ -81,21 +81,28 @@ When instructed to **create a new feature or domain `X`** (e.g., `users`, `billi
    - Never accumulate hours of multi-stage work into a single uncommitted blob.
    - Follow the **Git & Atomic Commits Protocol** below.
 
+7. **Telegram Bot (`services/bot` — aiogram 3 + aiogram-dialog):**
+   - The bot serves as a **Presentation Layer / BFF (Frontend)** for Telegram.
+   - **Single Source of Truth:** The bot MUST interact with the backend exclusively via `bot.client.ApiClient` over HTTP. NEVER import SQLModel database models or connect directly to PostgreSQL from the bot service.
+   - **Redis Storage:** Redis in `services/bot` is used **only** for FSM and aiogram-dialog UI stacks (`REDIS_FSM_DB=1`). Business domain caching belongs entirely inside `services/api`.
+   - **Dev vs Prod:** Dev uses polling (`make bot-dev`). Prod uses aiohttp webhook routed by Traefik with secret token verification.
+
 ---
 
 ## ⚡ Execution Context & Commands (Crucial)
 
-Always run commands using `--directory services/api` from root or inside `services/api`:
+Always run commands from root using `make` or with `--directory services/<service>`:
 
 ### Common Commands:
-- **Run tests:** `make test` (or `uv run --directory services/api pytest`)
-- **Lint:** `make lint` (or `uv run --directory services/api ruff check . && uv run --directory services/api mypy app tests`)
-- **Format code:** `make format` (or `uv run --directory services/api ruff format . && uv run --directory services/api ruff check --fix .`)
-- **Full quality check:** `make check` (runs lint + tests)
+- **Run API server:** `make dev` (or `uv run --directory services/api granian ...`)
+- **Run background worker:** `make worker` (or `uv run --directory services/api taskiq ...`)
+- **Run Telegram bot:** `make bot-dev` (or `uv run --directory services/bot python -m bot.main`)
+- **Run tests:** `make test` (or `make test-api` / `make test-bot`)
+- **Lint:** `make lint` (or `make lint-api` / `make lint-bot`)
+- **Format code:** `make format` (or `make format-api` / `make format-bot`)
+- **Full quality check:** `make check` (runs format check, lint, mypy, and pytest across all services)
 - **Apply migrations:** `make migrate` (or `uv run --directory services/api alembic upgrade head`)
 - **Create migration:** `make migration m="name"`
-- **Run local server:** `make dev`
-- **Run background worker:** `make worker`
 - **Docker services:** `make up` / `make down` / `make logs`
 
 ---

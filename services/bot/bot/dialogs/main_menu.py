@@ -5,7 +5,7 @@ from aiogram_dialog.widgets.kbd import Row, Start, SwitchTo
 from aiogram_dialog.widgets.text import Const, Format
 
 from bot.client.api import ApiClient
-from bot.dialogs.states import ItemsSG, MainSG
+from bot.dialogs.states import AISG, ItemsSG, MainSG
 
 
 async def get_system_status(
@@ -50,6 +50,11 @@ main_menu_window = Window(
         Const("📦 Управление Items"),
         id="to_items",
         state=ItemsSG.list_items,
+    ),
+    Start(
+        Const("🤖 DeepSeek AI Чат"),
+        id="to_ai_chat",
+        state=AISG.chat,
     ),
     Row(
         SwitchTo(

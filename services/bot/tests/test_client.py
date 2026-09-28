@@ -193,3 +193,71 @@ async def test_client_analyze_item() -> None:
         assert result["task_id"] == "task-uuid-12345"
     finally:
         await api_client.close()
+
+
+@pytest.mark.asyncio
+async def test_client_ask_ai() -> None:
+    def handler(request: httpx.Request) -> httpx.Response:
+        assert request.url.path == "/api/v1/ai/chat"
+        assert request.method == "POST"
+        body = json.loads(request.content)
+        assert body["prompt"] == "Hello AI"
+        return httpx.Response(
+            200,
+            json={
+                "conversation_id": "conv-123",
+                "response": "Hello human!",
+                "model": "deepseek-v3",
+                "search_enabled": False,
+                "file_ids": [],
+                "citations": [
+                    {
+                        "title": "Example Source",
+                        "url": "https://example.com",
+                        "snippet": "Example snippet",
+                    }
+                ],
+            },
+        )
+
+    transport = httpx.MockTransport(handler)
+    api_client = ApiClient(base_url="http://test-server")
+    api_client._client = httpx.AsyncClient(
+        transport=transport, base_url="http://test-server"
+    )
+
+    try:
+        resp = await api_client.ask_ai("Hello AI")
+        assert resp.conversation_id == "conv-123"
+        assert resp.response == "Hello human!"
+        assert len(resp.citations) == 1
+        assert resp.citations[0].title == "Example Source"
+    finally:
+        await api_client.close()
+
+
+@pytest.mark.asyncio
+async def test_client_reset_ai_conversation() -> None:
+    def handler(request: httpx.Request) -> httpx.Response:
+        assert request.url.path == "/api/v1/ai/conversations/conv-123"
+        assert request.method == "DELETE"
+        return httpx.Response(
+            200,
+            json={
+                "conversation_id": "conv-123",
+                "reset": True,
+            },
+        )
+
+    transport = httpx.MockTransport(handler)
+    api_client = ApiClient(base_url="http://test-server")
+    api_client._client = httpx.AsyncClient(
+        transport=transport, base_url="http://test-server"
+    )
+
+    try:
+        resp = await api_client.reset_ai_conversation("conv-123")
+        assert resp.conversation_id == "conv-123"
+        assert resp.reset is True
+    finally:
+        await api_client.close()

@@ -105,6 +105,8 @@ services:
       - POSTGRES_DB=${POSTGRES_DB:-app}
       - REDIS_HOST=redis
       - REDIS_PORT=6379
+      - AI_PROVIDER=${AI_PROVIDER:-deepseek}
+      - DEEPSEEK_PROXY_URL=${DEEPSEEK_PROXY_URL:-http://deepseek:8000}
     env_file:
       - path: .env
         required: false
@@ -192,6 +194,27 @@ services:
       - "traefik.http.routers.bot.tls.certresolver=letsencrypt"
       - "traefik.http.routers.bot.middlewares=compress@file,security-headers@file"
       - "traefik.http.services.bot.loadbalancer.server.port=8080"
+    networks:
+      - gateway
+    restart: always
+
+  deepseek:
+    build:
+      context: ./services/deepseek
+      dockerfile: Dockerfile
+    image: fastapi-template-deepseek:prod
+    container_name: deepseek_proxy_prod
+    environment:
+      - DS_SESSION_ID=${DS_SESSION_ID:-}
+      - AUTHORIZATION_TOKEN=${AUTHORIZATION_TOKEN:-}
+    env_file:
+      - path: .env
+        required: false
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8000/health', timeout=3)"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
     networks:
       - gateway
     restart: always

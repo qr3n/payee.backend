@@ -6,10 +6,18 @@ import pytest
 from aiogram_dialog import DialogManager
 
 from bot.client.schemas import (
+    AIChatResponse,
+    AICitation,
     HealthCheckResponse,
     ItemRead,
     PaginatedResponse,
     ReadinessResponse,
+)
+from bot.dialogs.ai import (
+    get_ai_chat_data,
+    on_prompt_entered,
+    on_reset_conversation,
+    on_toggle_search,
 )
 from bot.dialogs.items import get_item_detail, get_items_list
 from bot.dialogs.main_menu import get_system_status
@@ -110,3 +118,79 @@ async def test_get_item_detail() -> None:
     assert result["title"] == "Specific Item"
     assert result["description"] == "Detailed description"
     assert "✅" in result["status"]
+
+
+@pytest.mark.asyncio
+async def test_get_ai_chat_data() -> None:
+    manager = MagicMock(spec=DialogManager)
+    manager.dialog_data = {
+        "conversation_id": "test-conv-12345",
+        "search_enabled": True,
+        "last_prompt": "What is Python?",
+        "last_response": "Python is a programming language.",
+        "citations": [{"title": "Docs", "url": "https://python.org"}],
+    }
+
+    result = await get_ai_chat_data(dialog_manager=manager)
+    assert result["conv_id_short"] == "test-con"
+    assert "🟢" in result["search_status"]
+    assert "What is Python?" in result["dialogue_text"]
+    assert "https://python.org" in result["citations_text"]
+
+
+@pytest.mark.asyncio
+async def test_on_prompt_entered() -> None:
+    api_client = AsyncMock()
+    api_client.ask_ai.return_value = AIChatResponse(
+        conversation_id="conv-abc",
+        response="DeepSeek response",
+        model="deepseek-v3",
+        search_enabled=False,
+        file_ids=[],
+        citations=[AICitation(title="Source", url="https://example.com")],
+    )
+
+    message = AsyncMock()
+    manager = MagicMock(spec=DialogManager)
+    manager.dialog_data = {}
+    manager.middleware_data = {"api_client": api_client}
+
+    await on_prompt_entered(
+        message=message,
+        _widget=MagicMock(),
+        dialog_manager=manager,
+        text="Hello DeepSeek",
+    )
+
+    message.delete.assert_awaited_once()
+    api_client.ask_ai.assert_awaited_once()
+    assert manager.dialog_data["conversation_id"] == "conv-abc"
+    assert manager.dialog_data["last_prompt"] == "Hello DeepSeek"
+    assert manager.dialog_data["last_response"] == "DeepSeek response"
+
+
+@pytest.mark.asyncio
+async def test_on_toggle_search_and_reset() -> None:
+    api_client = AsyncMock()
+    callback = AsyncMock()
+    button = MagicMock()
+    manager = MagicMock(spec=DialogManager)
+    manager.dialog_data = {
+        "conversation_id": "conv-xyz",
+        "search_enabled": False,
+        "last_prompt": "Hello",
+    }
+    manager.middleware_data = {"api_client": api_client}
+
+    # Test toggle search
+    await on_toggle_search(callback=callback, _button=button, dialog_manager=manager)
+    assert manager.dialog_data["search_enabled"] is True
+    callback.answer.assert_awaited()
+
+    # Test reset conversation
+    await on_reset_conversation(
+        callback=callback, _button=button, dialog_manager=manager
+    )
+    api_client.reset_ai_conversation.assert_awaited_with("conv-xyz")
+    assert "last_prompt" not in manager.dialog_data
+    assert manager.dialog_data["conversation_id"] != "conv-xyz"

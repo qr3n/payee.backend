@@ -16,3 +16,9 @@ class ItemsSG(StatesGroup):
     item_detail = State()
     create_title = State()
     create_description = State()
+
+
+class AISG(StatesGroup):
+    """States for the DeepSeek AI chat dialog flow."""
+
+    chat = State()

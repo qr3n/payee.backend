@@ -50,3 +50,39 @@ class PaginatedResponse[T](BaseModel):
     page: int
     size: int
     pages: int
+
+
+class AICitation(BaseModel):
+    """Citation or web source reference returned by the AI provider."""
+
+    title: str
+    url: str
+    snippet: str | None = None
+
+
+class AIChatRequest(BaseModel):
+    """Request payload to query the backend AI chat endpoint."""
+
+    prompt: str = Field(min_length=1, max_length=10000)
+    conversation_id: str | None = None
+    model: str = "deepseek-v3"
+    search_enabled: bool = False
+    file_ids: list[str] | None = None
+
+
+class AIChatResponse(BaseModel):
+    """Response payload returned by the backend AI chat endpoint."""
+
+    conversation_id: str
+    response: str
+    model: str
+    search_enabled: bool = False
+    file_ids: list[str] = Field(default_factory=list)
+    citations: list[AICitation] = Field(default_factory=list)
+
+
+class AIResetResponse(BaseModel):
+    """Response payload returned after resetting an AI conversation context."""
+
+    conversation_id: str
+    reset: bool

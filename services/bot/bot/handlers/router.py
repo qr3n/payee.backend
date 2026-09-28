@@ -1,5 +1,6 @@
 from aiogram import Router
 
+from bot.dialogs.ai import ai_dialog
 from bot.dialogs.items import items_dialog
 from bot.dialogs.main_menu import main_dialog
 from bot.handlers.common import router as common_router
@@ -15,5 +16,6 @@ def get_root_router() -> Router:
     # 2. aiogram-dialog interactive flows
     root_router.include_router(main_dialog)
     root_router.include_router(items_dialog)
+    root_router.include_router(ai_dialog)
 
     return root_router

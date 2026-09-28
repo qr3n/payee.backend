@@ -5,6 +5,9 @@ import httpx
 import structlog
 
 from bot.client.schemas import (
+    AIChatRequest,
+    AIChatResponse,
+    AIResetResponse,
     HealthCheckResponse,
     ItemCreate,
     ItemRead,
@@ -102,3 +105,39 @@ class ApiClient:
         response.raise_for_status()
         result: dict[str, Any] = response.json()
         return result
+
+    async def ask_ai(
+        self,
+        prompt: str,
+        conversation_id: str | None = None,
+        model: str = "deepseek-v3",
+        search_enabled: bool = False,
+        file_ids: list[str] | None = None,
+    ) -> AIChatResponse:
+        """Send a prompt to the FastAPI AI chat endpoint."""
+        client = await self.get_client()
+        payload = AIChatRequest(
+            prompt=prompt,
+            conversation_id=conversation_id,
+            model=model,
+            search_enabled=search_enabled,
+            file_ids=file_ids,
+        ).model_dump(exclude_none=True)
+        response = await client.post("/api/v1/ai/chat", json=payload)
+        if response.status_code >= 400:
+            raise ApiClientError(
+                f"AI service error ({response.status_code}): {response.text}",
+                status_code=response.status_code,
+            )
+        return AIChatResponse.model_validate(response.json())
+
+    async def reset_ai_conversation(self, conversation_id: str) -> AIResetResponse:
+        """Reset stateful AI conversation context on the FastAPI backend."""
+        client = await self.get_client()
+        response = await client.delete(f"/api/v1/ai/conversations/{conversation_id}")
+        if response.status_code >= 400:
+            raise ApiClientError(
+                f"AI reset error ({response.status_code}): {response.text}",
+                status_code=response.status_code,
+            )
+        return AIResetResponse.model_validate(response.json())

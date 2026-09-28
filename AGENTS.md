@@ -87,6 +87,13 @@ When instructed to **create a new feature or domain `X`** (e.g., `users`, `billi
    - **Redis Storage:** Redis in `services/bot` is used **only** for FSM and aiogram-dialog UI stacks (`REDIS_FSM_DB=1`). Business domain caching belongs entirely inside `services/api`.
    - **Dev vs Prod:** Dev uses polling (`make bot-dev`). Prod uses aiohttp webhook routed by Traefik with secret token verification.
 
+8. **AI Service & DeepSeek Stateful Wrapper (`modules/ai` & `services/deepseek`):**
+   - **Abstract Interface:** Domain logic, tasks, and endpoints interact with LLMs through the abstract contract `BaseAIService` via FastAPI dependency injection: `ai_service: BaseAIService = Depends(get_ai_service)`.
+   - **Provider Toggle:** Controlled by `AI_PROVIDER`:
+     - `deepseek`: Uses `DeepSeekProxyService` communicating with the stateful reverse-proxy service (`services/deepseek`), providing multi-turn context memory, internet search citations, and file understanding.
+     - `mock`: Uses `MockAIService` with in-memory multi-turn dialogue simulation for fast (<1s), offline automated tests.
+   - **Bot AI Integration:** The Telegram Bot accesses AI capabilities exclusively via `ApiClient.ask_ai(...)` and `ApiClient.reset_ai_conversation(...)` through the FastAPI backend (`POST /api/v1/ai/chat`). The bot NEVER connects directly to the DeepSeek container.
+
 ---
 
 ## ⚡ Execution Context & Commands (Crucial)

@@ -63,6 +63,12 @@ class Settings(BaseSettings):
     REDIS_SOCKET_TIMEOUT: float = 5.0
     REDIS_SOCKET_CONNECT_TIMEOUT: float = 5.0
 
+    # AI & LLM Configuration (DeepSeek Stateful Wrapper)
+    AI_PROVIDER: str = "deepseek"
+    DEEPSEEK_PROXY_URL: str = "http://deepseek:8000/v1"
+    DEEPSEEK_DEFAULT_MODEL: str = "deepseek-v3"
+    DEEPSEEK_TIMEOUT: float = 120.0
+
     @property
     def redis_uri(self) -> str:
         """Constructs an async Redis connection string."""
@@ -108,3 +114,8 @@ class Settings(BaseSettings):
 
 
 settings = Settings()
+
+
+def get_settings() -> Settings:
+    """Singleton getter for application settings."""
+    return settings

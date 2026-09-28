@@ -35,7 +35,12 @@ class AIChatRequest(BaseModel):
     )
     file_ids: list[str] | None = Field(
         default=None,
-        description="List of uploaded file IDs to attach to this message context",
+        description=(
+            "Optional list of uploaded file IDs to attach to this message. "
+            "Obtain file IDs by calling POST /api/v1/ai/files first. "
+            "Omit or pass an empty list if no files are attached."
+        ),
+        examples=[[]],
     )
 
 

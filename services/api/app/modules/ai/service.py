@@ -120,12 +120,25 @@ class DeepSeekProxyService(BaseAIService):
             "search_enabled": search_enabled,
             "messages": [{"role": "user", "content": prompt}],
         }
-        if file_ids:
-            payload["file_ids"] = file_ids
+        # Strip empty/whitespace IDs that Swagger UI sends as placeholder "string"
+        valid_file_ids = [fid for fid in (file_ids or []) if fid and fid.strip()]
+        if valid_file_ids:
+            payload["file_ids"] = valid_file_ids
 
         client = await self._get_client()
         try:
             response = await client.post("/v1/chat/completions", json=payload)
+            # If proxy returned 502 and we had file_ids, retry without them.
+            # Handles invalid / expired file IDs (e.g. Swagger placeholder "string").
+            if response.status_code == 502 and valid_file_ids:
+                logger.warning(
+                    "deepseek_proxy_file_ids_caused_502_retrying_without",
+                    file_ids=valid_file_ids,
+                )
+                payload_no_files = {k: v for k, v in payload.items() if k != "file_ids"}
+                response = await client.post(
+                    "/v1/chat/completions", json=payload_no_files
+                )
             if response.status_code >= 400:
                 error_detail = response.text
                 logger.error(

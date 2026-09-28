@@ -125,7 +125,7 @@ class DeepSeekProxyService(BaseAIService):
 
         client = await self._get_client()
         try:
-            response = await client.post("/chat/completions", json=payload)
+            response = await client.post("/v1/chat/completions", json=payload)
             if response.status_code >= 400:
                 error_detail = response.text
                 logger.error(
@@ -179,7 +179,7 @@ class DeepSeekProxyService(BaseAIService):
         files = {"file": (filename, content, content_type)}
         try:
             response = await client.post(
-                "/files",
+                "/v1/files",
                 params={"conversation_id": conversation_id},
                 files=files,
             )
@@ -202,7 +202,7 @@ class DeepSeekProxyService(BaseAIService):
     ) -> list[AIFileMetadata]:
         client = await self._get_client()
         try:
-            response = await client.get(f"/conversations/{conversation_id}/files")
+            response = await client.get(f"/v1/conversations/{conversation_id}/files")
             if response.status_code >= 400:
                 raise AIServiceError(
                     f"List files HTTP {response.status_code}: {response.text}"
@@ -226,7 +226,7 @@ class DeepSeekProxyService(BaseAIService):
     ) -> AIResetResponse:
         client = await self._get_client()
         try:
-            response = await client.delete(f"/conversations/{conversation_id}")
+            response = await client.delete(f"/v1/conversations/{conversation_id}")
             if response.status_code >= 400:
                 raise AIServiceError(
                     f"Reset conversation HTTP {response.status_code}: {response.text}"

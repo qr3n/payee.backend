@@ -72,7 +72,7 @@ async def test_mock_ai_service_files_and_reset() -> None:
 @pytest.mark.asyncio
 async def test_deepseek_proxy_service_chat() -> None:
     def handler(request: Request) -> Response:
-        assert request.url.path == "/chat/completions"
+        assert request.url.path == "/v1/chat/completions"
         body = json.loads(request.content)
         assert body["model"] == "deepseek-v3"
         assert body["conversation_id"] == "c-123"

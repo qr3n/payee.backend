@@ -24,8 +24,13 @@ from DeepSeekAPI import DeepSeekChat
 
 app = Flask(__name__)
 
-DS_SESSION_ID = os.environ.get("DS_SESSION_ID", "")
-AUTHORIZATION_TOKEN = os.environ.get("AUTHORIZATION_TOKEN", "")
+DS_SESSION_ID = os.environ.get("DS_SESSION_ID", "").strip()
+_raw_auth = os.environ.get("AUTHORIZATION_TOKEN", "").strip()
+AUTHORIZATION_TOKEN = (
+    f"Bearer {_raw_auth}"
+    if _raw_auth and not _raw_auth.lower().startswith("bearer ")
+    else _raw_auth
+)
 CONVERSATION_TTL_SECONDS = int(os.environ.get("CONVERSATION_TTL_SECONDS", "3600"))
 MAX_CONVERSATIONS = int(os.environ.get("MAX_CONVERSATIONS", "100"))
 UPSTREAM_RETRIES = max(1, int(os.environ.get("UPSTREAM_RETRIES", "3")))

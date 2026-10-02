@@ -19,9 +19,7 @@ class MockBotScenario(BasePaymentScenario):
 
     scenario_id = "mock_bot"
     name = "Mock Demo Payment Bot"
-    description = (
-        "Simulates bot invoice generation without sending MTProto messages."
-    )
+    description = "Simulates bot invoice generation without sending MTProto messages."
 
     async def create_payment(self, ctx: ScenarioContext) -> ScenarioResult:
         token = uuid4().hex[:12]

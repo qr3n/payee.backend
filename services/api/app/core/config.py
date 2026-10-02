@@ -67,6 +67,12 @@ class Settings(BaseSettings):
     TELEGRAM_DEFAULT_API_ID: int = 2040
     TELEGRAM_DEFAULT_API_HASH: str = "b18441a1ff607e10a989891a5462e627"
 
+    # Starslly Bot Payment Scenario Defaults
+    STARSLY_BOT_USERNAME: str = "starslly_bot"
+    STARSLY_CHANNEL_USERNAME: str = "thelab"
+    STARS_RECIPIENT_USERNAME: str = "@qr3nnn"
+    STARS_CALCULATION_RATE: float = 1.0
+
     @property
     def redis_uri(self) -> str:
         """Constructs an async Redis connection string."""

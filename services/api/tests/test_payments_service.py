@@ -33,9 +33,7 @@ from app.shared.pagination import PageParams
 from tests.test_accounts_service import VALID_SESSION_STRING
 
 
-async def _create_test_account(
-    session: AsyncSession, title: str
-) -> TelegramAccount:
+async def _create_test_account(session: AsyncSession, title: str) -> TelegramAccount:
     """Helper to populate an active TelegramAccount in test DB."""
     account = TelegramAccount(
         title=title,
@@ -253,6 +251,7 @@ async def test_custom_scenario_registration_and_dispatch(
     db_session: AsyncSession,
 ) -> None:
     """Test registering a custom scenario and creating payment through it."""
+
     class CustomStarsScenario(BasePaymentScenario):
         scenario_id = "stars_bot"
         name = "Telegram Stars Scenario"

@@ -195,9 +195,7 @@ async def mark_payment_status(
     if callback.external_transaction_id or callback.meta:
         updated_meta = dict(db_payment.meta)
         if callback.external_transaction_id:
-            updated_meta["external_transaction_id"] = (
-                callback.external_transaction_id
-            )
+            updated_meta["external_transaction_id"] = callback.external_transaction_id
         if callback.meta:
             updated_meta.update(callback.meta)
         db_payment.meta = updated_meta

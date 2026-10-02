@@ -48,7 +48,7 @@ class BotSettings(BaseSettings):
         description="Base URL of the FastAPI backend service",
     )
     API_TIMEOUT: float = Field(
-        default=10.0,
+        default=90.0,
         description="HTTP request timeout in seconds for backend calls",
     )
 

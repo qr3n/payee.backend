@@ -1,6 +1,7 @@
 from decimal import Decimal, InvalidOperation
 from typing import Any
 
+import structlog
 from aiogram.types import CallbackQuery, Message
 from aiogram_dialog import Dialog, DialogManager, Window
 from aiogram_dialog.widgets.input import TextInput
@@ -16,6 +17,8 @@ from aiogram_dialog.widgets.text import Const, Format
 
 from bot.client.api import ApiClient
 from bot.dialogs.states import ScenariosSG
+
+logger = structlog.stdlib.get_logger(__name__)
 
 
 def format_payment_status(status: str) -> str:
@@ -172,11 +175,23 @@ async def execute_payment_creation(
     client_user_id = f"tg_admin_{user_id}"
 
     try:
+        logger.info(
+            "bot_launching_scenario_payment",
+            scenario_id=scenario_id,
+            amount=str(amount),
+            client_user_id=client_user_id,
+        )
         payment = await api_client.create_payment(
             client_user_id=client_user_id,
             amount=amount,
             scenario_id=scenario_id,
             currency="RUB",
+        )
+        logger.info(
+            "bot_scenario_payment_created",
+            payment_id=str(payment.id),
+            status=payment.status,
+            link=payment.payment_link,
         )
         dialog_manager.dialog_data["last_payment_id"] = str(payment.id)
         dialog_manager.dialog_data["payment_action_msg"] = (
@@ -184,8 +199,21 @@ async def execute_payment_creation(
         )
         await dialog_manager.switch_to(ScenariosSG.payment_result)
     except Exception as exc:
+        logger.error(
+            "bot_scenario_execution_error",
+            scenario_id=scenario_id,
+            amount=str(amount),
+            error=str(exc),
+            error_type=type(exc).__name__,
+        )
+        err_detail = str(exc).strip()
+        if not err_detail or "readtimeout" in err_detail.lower():
+            err_detail = (
+                "Превышено время ожидания ответа (ReadTimeout). "
+                "Сценарий выполняется в фоне или бот отвечает медленно."
+            )
         dialog_manager.dialog_data["last_action_msg"] = (
-            f"❌ Ошибка запуска сценария:\n{exc}"
+            f"❌ Ошибка запуска сценария:\n{err_detail}"
         )
         await dialog_manager.switch_to(ScenariosSG.list_scenarios)
 

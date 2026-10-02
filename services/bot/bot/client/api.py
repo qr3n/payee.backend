@@ -37,7 +37,7 @@ class ApiClient:
     validation, background task scheduling, and persistence.
     """
 
-    def __init__(self, base_url: str, timeout: float = 30.0) -> None:
+    def __init__(self, base_url: str, timeout: float = 90.0) -> None:
         self.base_url = base_url.rstrip("/")
         self._client: httpx.AsyncClient | None = None
         self._timeout = timeout

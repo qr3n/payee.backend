@@ -67,6 +67,14 @@ class StarsllyBotScenario(BasePaymentScenario):
 
         client: TelegramClient | None = None
         try:
+            logger.info(
+                "starslly_scenario_started",
+                account_id=str(ctx.account.id),
+                bot=bot_username,
+                recipient=recipient,
+                stars_count=stars_count,
+                amount=str(ctx.amount),
+            )
             client = create_telethon_client(ctx.account)
             await client.connect()
 
@@ -78,6 +86,7 @@ class StarsllyBotScenario(BasePaymentScenario):
                 )
 
             # Step 1: Send /start
+            logger.info("starslly_step_1_sending_start", bot=bot_username)
             start_msg = await client.send_message(bot_username, "/start")
 
             # Check bot response
@@ -96,12 +105,18 @@ class StarsllyBotScenario(BasePaymentScenario):
             # Step 2 & 3: Channel subscription check if prompted
             check_sub_btn = find_button_by_text(first_reply, "Проверить подписку")
             if check_sub_btn:
+                logger.info(
+                    "starslly_step_2_channel_sub_required",
+                    channel=channel_username,
+                )
                 await join_channel_safely(client, channel_username)
                 await asyncio.sleep(1.0)
                 await check_sub_btn.click()
+                logger.info("starslly_step_3_sub_verified_clicked")
 
             # Step 4: Open stars menu
             await asyncio.sleep(0.8)
+            logger.info("starslly_step_4_open_stars_menu")
             buy_stars_msg = await client.send_message(bot_username, "⭐️ Купить Звезды")
 
             # Step 5: Wait for stars prompt and click "Купить другу"
@@ -123,6 +138,7 @@ class StarsllyBotScenario(BasePaymentScenario):
                     code="BOT_INTERACTION_ERROR",
                     status_code=502,
                 )
+            logger.info("starslly_step_5_click_gift_friend")
             await gift_friend_btn.click()
 
             # Step 6: Wait for username prompt & send recipient username
@@ -136,6 +152,7 @@ class StarsllyBotScenario(BasePaymentScenario):
                 timeout=15.0,
             )
 
+            logger.info("starslly_step_6_sending_recipient", recipient=recipient)
             send_user_msg = await client.send_message(bot_username, recipient)
 
             # Step 7: Wait for stars count prompt & send calculated stars
@@ -150,6 +167,10 @@ class StarsllyBotScenario(BasePaymentScenario):
                 min_id=send_user_msg.id,
             )
 
+            logger.info(
+                "starslly_step_7_sending_stars_count",
+                stars_count=stars_count,
+            )
             send_stars_msg = await client.send_message(bot_username, str(stars_count))
 
             # Step 8: Wait for payment method selection & click 'QR/СБП'
@@ -174,6 +195,7 @@ class StarsllyBotScenario(BasePaymentScenario):
                     code="BOT_INTERACTION_ERROR",
                     status_code=502,
                 )
+            logger.info("starslly_step_8_click_sbp_button")
             await sbp_button.click()
 
             # Step 9: Wait for invoice order message with 'Оплатить' link button
@@ -193,6 +215,10 @@ class StarsllyBotScenario(BasePaymentScenario):
                 )
 
             _, payment_link = url_button_info
+            logger.info(
+                "starslly_step_9_invoice_link_extracted",
+                payment_link=payment_link,
+            )
 
             return ScenarioResult(
                 payment_link=payment_link,

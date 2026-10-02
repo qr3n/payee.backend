@@ -2,6 +2,7 @@ import http
 from typing import Any
 
 from fastapi import FastAPI, Request, status
+from fastapi.encoders import jsonable_encoder
 from fastapi.exceptions import RequestValidationError
 from fastapi.responses import JSONResponse
 from starlette.exceptions import HTTPException as StarletteHTTPException
@@ -69,7 +70,7 @@ async def validation_exception_handler(
         status_code=status.HTTP_422_UNPROCESSABLE_CONTENT,
         code="VALIDATION_ERROR",
         message="Request payload or parameters validation failed.",
-        details=exc.errors(),
+        details=jsonable_encoder(exc.errors()),
     )
 
 

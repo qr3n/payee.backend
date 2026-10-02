@@ -11,6 +11,11 @@ from app.modules.accounts.schemas import (
     TelegramAccountRead,
     TelegramAccountUpdate,
 )
+from app.modules.accounts.session_pool import (
+    TelegramSessionPool,
+    create_telethon_client,
+    telegram_session_pool,
+)
 
 __all__ = [
     "AccountStatus",
@@ -19,5 +24,8 @@ __all__ = [
     "TelegramAccountCreate",
     "TelegramAccountRead",
     "TelegramAccountUpdate",
+    "TelegramSessionPool",
+    "create_telethon_client",
     "router",
+    "telegram_session_pool",
 ]

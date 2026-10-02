@@ -66,6 +66,7 @@ class Settings(BaseSettings):
     # Telegram MTProto Client Defaults
     TELEGRAM_DEFAULT_API_ID: int = 2040
     TELEGRAM_DEFAULT_API_HASH: str = "b18441a1ff607e10a989891a5462e627"
+    TELEGRAM_SESSION_IDLE_TTL: int = 1800  # Keep warm session in memory for 30 minutes
 
     # Starslly Bot Payment Scenario Defaults
     STARSLY_BOT_USERNAME: str = "starslly_bot"

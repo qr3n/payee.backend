@@ -13,6 +13,7 @@ from app.core.exception_handlers import register_exception_handlers
 from app.core.logging import setup_logging
 from app.core.middleware import RequestIDMiddleware
 from app.core.redis import close_redis
+from app.modules.accounts.session_pool import telegram_session_pool
 from app.modules.health import HealthCheckResponse
 
 # Configure structured logging (JSON in production, human-readable in development)
@@ -34,6 +35,7 @@ async def lifespan(_app: FastAPI) -> AsyncGenerator[None, None]:
         await broker.shutdown()
     await async_engine.dispose()
     await close_redis()
+    await telegram_session_pool.close_all()
 
 
 app = FastAPI(

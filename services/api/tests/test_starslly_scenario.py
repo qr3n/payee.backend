@@ -185,18 +185,20 @@ async def test_starslly_bot_scenario_complete_flow() -> None:
 
     with (
         patch(
-            "app.modules.payments.scenarios.starslly_scenario.create_telethon_client"
-        ) as mock_create_client,
+            "app.modules.payments.scenarios.starslly_scenario.telegram_session_pool.get_connected_client"
+        ) as mock_get_client,
+        patch(
+            "app.modules.payments.scenarios.starslly_scenario.telegram_session_pool.touch",
+            new=AsyncMock(),
+        ) as mock_touch,
         patch(
             "app.modules.payments.scenarios.starslly_scenario.join_channel_safely",
             new=AsyncMock(return_value=True),
         ),
     ):
         mock_client = AsyncMock()
-        mock_client.connect = AsyncMock()
         mock_client.is_user_authorized = AsyncMock(return_value=True)
         mock_client.is_connected = MagicMock(return_value=True)
-        mock_client.disconnect = AsyncMock()
 
         # Wire responses to get_messages
         mock_client.get_messages = AsyncMock(side_effect=responses)
@@ -205,7 +207,7 @@ async def test_starslly_bot_scenario_complete_flow() -> None:
         mock_start.id = 100
         mock_client.send_message = AsyncMock(return_value=mock_start)
 
-        mock_create_client.return_value = mock_client
+        mock_get_client.return_value = mock_client
 
         scenario = StarsllyBotScenario()
         result = await scenario.create_payment(ctx)
@@ -218,4 +220,4 @@ async def test_starslly_bot_scenario_complete_flow() -> None:
         btn_verify.click.assert_awaited_once()
         btn_gift.click.assert_awaited_once()
         btn_sbp.click.assert_awaited_once()
-        mock_client.disconnect.assert_awaited_once()
+        mock_touch.assert_awaited_once_with(account.id)

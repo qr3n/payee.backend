@@ -8,6 +8,7 @@ from telethon import TelegramClient
 from app.core.config import settings
 from app.core.exceptions import AppException
 from app.core.logging import get_logger
+from app.modules.accounts.session_pool import telegram_session_pool
 from app.modules.payments.scenarios.base import (
     BasePaymentScenario,
     ScenarioContext,
@@ -15,7 +16,6 @@ from app.modules.payments.scenarios.base import (
 )
 from app.modules.payments.scenarios.bot_dialog_helper import (
     click_button_fast,
-    create_telethon_client,
     find_button_by_text,
     find_url_button,
     join_channel_safely,
@@ -74,15 +74,7 @@ class StarsllyBotScenario(BasePaymentScenario):
                 stars_count=stars_count,
                 amount=str(ctx.amount),
             )
-            client = create_telethon_client(ctx.account)
-            await client.connect()
-
-            if not await client.is_user_authorized():
-                raise AppException(
-                    message="Assigned Telegram account is not authorized.",
-                    code="ACCOUNT_UNAUTHORIZED",
-                    status_code=500,
-                )
+            client = await telegram_session_pool.get_connected_client(ctx.account)
 
             # Step 1: Send /start
             logger.info("starslly_step_1_sending_start", bot=bot_username)
@@ -244,8 +236,4 @@ class StarsllyBotScenario(BasePaymentScenario):
                 status_code=502,
             ) from e
         finally:
-            try:
-                if client is not None and client.is_connected():
-                    await client.disconnect()
-            except Exception:
-                pass
+            await telegram_session_pool.touch(ctx.account.id)

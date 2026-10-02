@@ -93,44 +93,35 @@ fastapi-backend-template/
             │   │   ├── schemas.py # Pydantic DTO (ItemCreate, ItemUpdate, ItemRead)
             │   │   ├── service.py # Бизнес-логика (Unit of Work, session.flush)
             │   │   └── tasks.py   # Асинхронные задачи Taskiq
-            │   └── ai/         # 🧠 Абстрактный срез ИИ-ассистента
-            │       ├── __init__.py
-            │       ├── router.py  # Эндпоинты FastAPI (/api/v1/ai/)
-            │       ├── schemas.py # Pydantic DTO (AIChatRequest, AIChatResponse)
-            │       └── service.py # BaseAIService, DeepSeekProxyService, MockAIService
             └── api/
                 ├── __init__.py
                 ├── deps.py     # FastAPI Depends провайдеры (get_db, get_redis)
                 └── v1/
                     ├── __init__.py
                     └── router.py # Агрегатор роутеров доменных модулей
-    ├── bot/                    # 🤖 Микросервис Telegram-бота (aiogram 3 + aiogram-dialog)
-    │   ├── Dockerfile          # Многоэтапный Dockerfile (base -> builder -> dev / prod с uv)
-    │   ├── .dockerignore       # Исключения для сборки контейнера
-    │   ├── pyproject.toml      # Зависимости и конфигурация сервиса (uv / PEP 621)
-    │   ├── uv.lock             # Зафиксированные версии пакетов (uv)
-    │   ├── scripts/
-    │   │   └── entrypoint.sh   # Скрипт точки входа контейнера
-    │   ├── tests/              # Набор тестов (pytest + mock client + fakedialogs)
-    │   │   ├── __init__.py
-    │   │   ├── conftest.py     # Фикстуры
-    │   │   ├── test_client.py  # Тесты типизированного HTTP-клиента к API
-    │   │   ├── test_dialogs.py # Тесты геттеров и стейтов aiogram-dialog
-    │   │   ├── test_handlers.py# Тесты команд (/start, /menu, /help)
-    │   │   └── test_webhook.py # Тесты вебхук-сервера и healthcheck
-    │   └── bot/                # Исходный код бота
-    │       ├── __init__.py
-    │       ├── main.py         # Единая точка входа (Polling в Dev / Webhook в Prod)
-    │       ├── core/           # Конфигурация (pydantic-settings), логирование, RedisStorage
-    │       ├── client/         # Асинхронный HTTP-клиент (httpx) к FastAPI
-    │       ├── dialogs/        # Интерактивные меню и формы aiogram-dialog (Items, AI Chat)
-    │       ├── handlers/       # Обработчики команд Telegram
-    │       ├── middlewares/    # Внедрение ApiClientMiddleware и LoggingMiddleware
-    │       └── webhook/        # Webhook-сервер aiohttp для production
-    └── deepseek/               # ⚡ Stateful DeepSeek Wrapper Proxy (smkttl/deepseek-api)
-        ├── Dockerfile          # Сборка прокси-сервера со curl_cffi и PoW patch
-        ├── stateful_server.py  # HTTP OpenAI-совместимый сервер со stateful сессиями
-        └── apply_upstream_patch.py # Патч апстрим библиотеки DeepSeek
+    └── bot/                    # 🤖 Микросервис Telegram-бота (aiogram 3 + aiogram-dialog)
+        ├── Dockerfile          # Многоэтапный Dockerfile (base -> builder -> dev / prod с uv)
+        ├── .dockerignore       # Исключения для сборки контейнера
+        ├── pyproject.toml      # Зависимости и конфигурация сервиса (uv / PEP 621)
+        ├── uv.lock             # Зафиксированные версии пакетов (uv)
+        ├── scripts/
+        │   └── entrypoint.sh   # Скрипт точки входа контейнера
+        ├── tests/              # Набор тестов (pytest + mock client + fakedialogs)
+        │   ├── __init__.py
+        │   ├── conftest.py     # Фикстуры
+        │   ├── test_client.py  # Тесты типизированного HTTP-клиента к API
+        │   ├── test_dialogs.py # Тесты геттеров и стейтов aiogram-dialog
+        │   ├── test_handlers.py# Тесты команд (/start, /menu, /help)
+        │   └── test_webhook.py # Тесты вебхук-сервера и healthcheck
+        └── bot/                # Исходный код бота
+            ├── __init__.py
+            ├── main.py         # Единая точка входа (Polling в Dev / Webhook в Prod)
+            ├── core/           # Конфигурация (pydantic-settings), логирование, RedisStorage
+            ├── client/         # Асинхронный HTTP-клиент (httpx) к FastAPI
+            ├── dialogs/        # Интерактивные меню и формы aiogram-dialog (Items)
+            ├── handlers/       # Обработчики команд Telegram
+            ├── middlewares/    # Внедрение ApiClientMiddleware и LoggingMiddleware
+            └── webhook/        # Webhook-сервер aiohttp для production
 ```
 
 ---
@@ -322,50 +313,6 @@ uv run alembic downgrade -1
 
 ---
 
-## 🧠 Абстрактный сервис ИИ & Stateful DeepSeek Proxy
-
-Архитектура предоставляет провайдеро-независимый слой взаимодействия с языковыми моделями. Вся бизнес-логика, фоновые воркеры и Telegram-бот работают через контракт [`BaseAIService`](file:///home/qr3n/PycharmProjects/fastapi-backend-template/services/api/app/modules/ai/service.py):
-
-### 1. Архитектурные принципы
-- **Единый источник правды (SSOT):** Telegram-бот и любые внешние фронтенды обращаются к ИИ **только через FastAPI API** (`/api/v1/ai/chat`), никогда не подключаясь к сервису DeepSeek напрямую.
-- **Поддержка провайдеров (`AI_PROVIDER`):**
-  - `deepseek`: Прокси-сервис на базе `curl_cffi` (`services/deepseek`), использующий stateful сессии DeepSeek с поддержкой сохранения контекста (`conversation_id`), поиска в интернете с цитатами источников (`search_enabled`) и анализа файлов.
-  - `mock`: Детерминированный in-memory мок для мгновенного прогона тестов (<1с) и оффлайн-разработки.
-- **Инъекция зависимостей:** В эндпоинтах и фоновых задачах сервис внедряется через `FastAPI Depends`:
-  ```python
-  from app.modules.ai.service import BaseAIService, get_ai_service
-  from fastapi import Depends
-
-  @router.post("/chat")
-  async def chat(
-      request: AIChatRequest,
-      ai_service: BaseAIService = Depends(get_ai_service),
-  ) -> AIChatResponse:
-      return await ai_service.chat(
-          prompt=request.prompt,
-          conversation_id=request.conversation_id,
-          search_enabled=request.search_enabled,
-      )
-  ```
-
-### 2. REST API эндпоинты ИИ
-
-| Метод | Путь | Описание |
-|---|---|---|
-| `POST` | `/api/v1/ai/chat` | Отправка сообщения с сохранением истории контекста и цитатами |
-| `POST` | `/api/v1/ai/files` | Загрузка файлов и изображений в контекст диалога |
-| `GET` | `/api/v1/ai/conversations/{id}/files` | Получение списка файлов диалога |
-| `DELETE` | `/api/v1/ai/conversations/{id}` | Очистка и сброс контекста диалога |
-
-### 3. Telegram-бот: Интерактивный диалог с ИИ
-В боте (`services/bot`) реализован сценарий общения на базе `aiogram-dialog`:
-- Главное меню -> **🤖 DeepSeek AI Чат**
-- Кнопка **🌐 Поиск: ВКЛ/ВЫКЛ** для включения поиска в сети с выводом кликабельных ссылок на источники
-- Кнопка **🔄 Сбросить память** для моментального сброса контекста
-- Автоматическая очистка пользовательских сообщений для поддержания эстетичного интерфейса
-
----
-
 ## 🛡️ Correlation ID (`X-Request-ID`) и единый формат ошибок
 
 Каждый HTTP-запрос проходит через высокопроизводительный pure ASGI middleware [`RequestIDMiddleware`](file:///home/qr3n/PycharmProjects/fastapi-backend-template/services/api/app/core/middleware.py):
@@ -477,11 +424,5 @@ cp .env.example .env
 | `TELEGRAM_WEBHOOK_SECRET` | *(случайная строка)* | Секретный токен для проверки вебхука |
 | `REDIS_FSM_DB` | `1` | Изолированная БД Redis для FSM и aiogram-dialog |
 | `API_BASE_URL` | `http://api:8000` | URL бэкенда для обращения из Telegram-бота |
-| `AI_PROVIDER` | `deepseek` (или `mock`) | Провайдер ИИ-ассистента |
-| `DEEPSEEK_PROXY_URL` | `http://deepseek:8000` | URL прокси-сервиса DeepSeek |
-| `DEEPSEEK_DEFAULT_MODEL` | `deepseek-v3` | Модель по умолчанию для обращений к ИИ |
-| `DEEPSEEK_TIMEOUT` | `120.0` | Таймаут ожидания генерации ответа в секундах |
-| `DS_SESSION_ID` | *(из cookie сессии)* | Cookie `userToken` веб-сессии DeepSeek |
-| `AUTHORIZATION_TOKEN` | *(из заголовка Authorization)* | Bearer токен веб-сессии DeepSeek |
-| `DEEPSEEK_PROXY_PORT` | `8001` | Внешний порт прокси DeepSeek для прямой отладки |
+
 

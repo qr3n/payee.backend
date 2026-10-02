@@ -1,13 +1,19 @@
+"""
+Integration tests for middlewares, RFC 9457 error formatting, and rate limiting.
+"""
+
 import uuid
-from unittest.mock import AsyncMock, patch
+from unittest.mock import MagicMock
 
 import pytest
 from httpx import AsyncClient
+from redis.asyncio import Redis
 from sqlmodel import func, select
 from sqlmodel.ext.asyncio.session import AsyncSession
 
-from app.core.broker import broker
-from app.modules.items import Item
+from app.core.exceptions import RateLimitException
+from app.core.rate_limit import RateLimiter
+from app.modules.accounts.models import TelegramAccount
 
 
 @pytest.mark.asyncio
@@ -28,7 +34,6 @@ async def test_generated_request_id_header(client: AsyncClient) -> None:
     assert response.status_code == 200
     generated_id = response.headers.get("x-request-id")
     assert generated_id is not None
-    # Validate it is a valid UUID
     parsed = uuid.UUID(generated_id)
     assert str(parsed) == generated_id
 
@@ -36,8 +41,8 @@ async def test_generated_request_id_header(client: AsyncClient) -> None:
 @pytest.mark.asyncio
 async def test_validation_error_unified_format(client: AsyncClient) -> None:
     """Verify that Pydantic validation errors return unified ErrorResponse."""
-    # Send empty payload to POST /api/v1/items/ where 'title' is required
-    response = await client.post("/api/v1/items/", json={})
+    # Send empty payload to POST /api/v1/accounts/ where 'title' is required
+    response = await client.post("/api/v1/accounts/", json={})
 
     assert response.status_code == 422
     assert "x-request-id" in response.headers
@@ -55,7 +60,7 @@ async def test_validation_error_unified_format(client: AsyncClient) -> None:
 @pytest.mark.asyncio
 async def test_pagination_out_of_bounds(client: AsyncClient) -> None:
     """Verify pagination behavior for out-of-range page requests."""
-    response = await client.get("/api/v1/items/?page=999&size=10")
+    response = await client.get("/api/v1/accounts/?page=999&size=10")
 
     assert response.status_code == 200
     data = response.json()
@@ -73,25 +78,22 @@ async def test_prometheus_metrics_endpoint(client: AsyncClient) -> None:
 
 
 @pytest.mark.asyncio
-async def test_rate_limiter_exceeded(client: AsyncClient) -> None:
-    """Verify that rate limiter returns 429 when max requests are exceeded."""
-    create_resp = await client.post(
-        "/api/v1/items/", json={"title": "Rate Limit Target", "description": "Desc"}
-    )
-    item_id = create_resp.json()["id"]
+async def test_rate_limiter_exceeded_unit(fake_redis: Redis) -> None:
+    """Verify that RateLimiter raises RateLimitException when limit exceeded."""
+    limiter = RateLimiter(max_requests=5, window_seconds=60, key_prefix="test_rl")
+    mock_request = MagicMock()
+    mock_request.headers.get.return_value = None
+    mock_request.client.host = "192.168.1.1"
+    mock_request.scope = {"path": "/test"}
 
-    with patch.object(broker, "kick", new_callable=AsyncMock):
-        # Endpoint allows 10 requests per minute; exhaust the quota
-        for _ in range(10):
-            resp = await client.post(f"/api/v1/items/{item_id}/analyze")
-            assert resp.status_code == 202
+    # Execute 5 allowed requests
+    for _ in range(5):
+        await limiter(request=mock_request, redis=fake_redis)
 
-        # 11th request must be blocked with HTTP 429
-        blocked_resp = await client.post(f"/api/v1/items/{item_id}/analyze")
-        assert blocked_resp.status_code == 429
-        data = blocked_resp.json()
-        assert "error" in data
-        assert data["error"]["code"] == "RATE_LIMIT_EXCEEDED"
+    # 6th request must trigger RateLimitException
+    with pytest.raises(RateLimitException) as exc_info:
+        await limiter(request=mock_request, redis=fake_redis)
+    assert exc_info.value.code == "RATE_LIMIT_EXCEEDED"
 
 
 @pytest.mark.asyncio
@@ -99,13 +101,17 @@ async def test_transaction_rollback_on_error(
     client: AsyncClient, db_session: AsyncSession
 ) -> None:
     """Verify that failed requests roll back database changes."""
-    count_before = (await db_session.exec(select(func.count()).select_from(Item))).one()
+    count_before = (
+        await db_session.exec(select(func.count()).select_from(TelegramAccount))
+    ).one()
 
-    # Attempt to post an invalid item payload that fails validation
+    # Attempt to post an invalid account payload that fails validation
     resp = await client.post(
-        "/api/v1/items/", json={"title": "", "description": "Invalid"}
+        "/api/v1/accounts/", json={"title": "", "session_string": "short"}
     )
     assert resp.status_code == 422
 
-    count_after = (await db_session.exec(select(func.count()).select_from(Item))).one()
+    count_after = (
+        await db_session.exec(select(func.count()).select_from(TelegramAccount))
+    ).one()
     assert count_before == count_after

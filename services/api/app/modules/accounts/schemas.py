@@ -212,3 +212,80 @@ class TelegramAccountCheckResponse(BaseModel):
     )
     error: str | None = Field(default=None, description="Error explanation if any")
     checked_at: datetime = Field(description="Check timestamp")
+
+
+class PhoneCodeRequest(BaseModel):
+    """Payload to request Telegram confirmation code for a phone number."""
+
+    phone: str = Field(
+        min_length=7,
+        max_length=32,
+        description="Phone number in international format (+7...)",
+        examples=["+79991234567"],
+    )
+    title: str | None = Field(
+        default=None,
+        max_length=128,
+        description="Optional friendly account label",
+    )
+    api_id: int | None = Field(
+        default=None,
+        description="Optional Telegram API ID",
+    )
+    api_hash: str | None = Field(
+        default=None,
+        max_length=64,
+        description="Optional Telegram API Hash",
+    )
+    proxy_url: str | None = Field(
+        default=None,
+        max_length=512,
+        description="Optional proxy URL",
+    )
+
+
+class PhoneCodeResponse(BaseModel):
+    """Response returned after Telegram sends login code."""
+
+    phone_code_hash: str = Field(description="Hash identifying this auth session")
+    timeout_seconds: int = Field(default=120, description="Seconds until code expires")
+    phone: str = Field(description="Sanitized phone number")
+
+
+class PhoneSignInRequest(BaseModel):
+    """Payload to complete sign-in using phone code or 2FA cloud password."""
+
+    phone_code_hash: str = Field(description="Hash from send-code step")
+    code: str = Field(
+        default="",
+        description="Telegram confirmation code received via SMS or Telegram",
+    )
+    phone: str | None = Field(
+        default=None,
+        description="Optional phone number",
+    )
+    two_fa_password: str | None = Field(
+        default=None,
+        description="Cloud 2FA password if required",
+    )
+
+
+class PhoneSignInResponse(BaseModel):
+    """Response returned upon sign-in attempt."""
+
+    status: str = Field(
+        description="Result status: 'success' or 'needs_2fa'",
+        examples=["success", "needs_2fa"],
+    )
+    account: TelegramAccountRead | None = Field(
+        default=None,
+        description="Authorized account details on success",
+    )
+    message: str | None = Field(
+        default=None,
+        description="Informative message or instructions",
+    )
+    phone_code_hash: str | None = Field(
+        default=None,
+        description="Phone code hash if 2FA is needed",
+    )

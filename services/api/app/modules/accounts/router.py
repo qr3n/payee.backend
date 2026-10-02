@@ -4,13 +4,18 @@ FastAPI router endpoints for Telegram accounts management and verification.
 
 from uuid import UUID
 
-from fastapi import APIRouter, Depends, status
+from fastapi import APIRouter, Depends, File, Form, UploadFile, status
 from sqlmodel.ext.asyncio.session import AsyncSession
 
 from app.api.deps import get_db
-from app.core.exceptions import NotFoundException
+from app.core.exceptions import AppException, NotFoundException
+from app.modules.accounts import phone_auth_service
 from app.modules.accounts import service as account_service
 from app.modules.accounts.schemas import (
+    PhoneCodeRequest,
+    PhoneCodeResponse,
+    PhoneSignInRequest,
+    PhoneSignInResponse,
     TelegramAccountCheckResponse,
     TelegramAccountCreate,
     TelegramAccountRead,
@@ -38,6 +43,103 @@ async def create_account(
     """Create a new Telegram account session."""
     account = await account_service.create_account(session=db, account_in=account_in)
     return TelegramAccountRead.model_validate(account)
+
+
+@router.post(
+    "/upload",
+    response_model=TelegramAccountRead,
+    status_code=status.HTTP_201_CREATED,
+    summary="Upload .session and .json pair",
+    description=(
+        "Upload a Telethon .session file along with its client .json metadata. "
+        "Automatically extracts app_id, app_hash, device profile, and proxy."
+    ),
+)
+async def upload_account_session(
+    session_file: UploadFile = File(..., description="Telethon .session file"),
+    json_file: UploadFile = File(..., description="Client metadata .json file"),
+    title: str | None = Form(default=None, description="Optional account label"),
+    proxy_url: str | None = Form(default=None, description="Optional proxy override"),
+    verify: bool = Form(default=True, description="Verify session via MTProto"),
+    db: AsyncSession = Depends(get_db),
+) -> TelegramAccountRead:
+    """Import an account from .session + .json files."""
+    if not session_file.filename or not session_file.filename.endswith(".session"):
+        raise AppException("First file must have a .session extension")
+    if not json_file.filename or not json_file.filename.endswith(".json"):
+        raise AppException("Second file must have a .json extension")
+
+    session_bytes = await session_file.read()
+    json_bytes = await json_file.read()
+
+    account = await account_service.create_account_from_files(
+        session=db,
+        session_bytes=session_bytes,
+        json_bytes=json_bytes,
+        title=title,
+        proxy_url=proxy_url,
+        verify=verify,
+    )
+    return TelegramAccountRead.model_validate(account)
+
+
+@router.post(
+    "/auth/send-code",
+    response_model=PhoneCodeResponse,
+    summary="Request Telegram login code via phone",
+    description="Initiates MTProto connection and sends confirmation code to Telegram.",
+)
+async def send_phone_code(
+    payload: PhoneCodeRequest,
+) -> PhoneCodeResponse:
+    """Request confirmation code for phone number."""
+    result = await phone_auth_service.request_phone_code(
+        phone=payload.phone,
+        title=payload.title,
+        api_id=payload.api_id,
+        api_hash=payload.api_hash,
+        proxy_url=payload.proxy_url,
+    )
+    return PhoneCodeResponse(
+        phone_code_hash=result["phone_code_hash"],
+        timeout_seconds=result["timeout_seconds"],
+        phone=result["phone"],
+    )
+
+
+@router.post(
+    "/auth/sign-in",
+    response_model=PhoneSignInResponse,
+    summary="Complete phone login with code or 2FA password",
+    description="Verifies Telegram code or cloud password and creates account in pool.",
+)
+async def sign_in_phone(
+    payload: PhoneSignInRequest,
+    db: AsyncSession = Depends(get_db),
+) -> PhoneSignInResponse:
+    """Sign in using phone code or 2FA password."""
+    result = await phone_auth_service.sign_in_with_phone(
+        phone_code_hash=payload.phone_code_hash,
+        code=payload.code,
+        db_session=db,
+        phone=payload.phone,
+        two_fa_password=payload.two_fa_password,
+    )
+
+    if result.get("status") == "needs_2fa":
+        return PhoneSignInResponse(
+            status="needs_2fa",
+            message=result.get("message"),
+            phone_code_hash=result.get("phone_code_hash"),
+        )
+
+    acc = result.get("account")
+    account_dto = TelegramAccountRead.model_validate(acc) if acc else None
+    return PhoneSignInResponse(
+        status="success",
+        account=account_dto,
+        message=result.get("message"),
+    )
 
 
 @router.get(

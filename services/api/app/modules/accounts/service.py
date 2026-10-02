@@ -197,3 +197,82 @@ async def verify_and_update_account(
     )
 
     return db_account, response
+
+
+async def create_account_from_files(
+    session: AsyncSession,
+    session_bytes: bytes,
+    json_bytes: bytes,
+    title: str | None = None,
+    proxy_url: str | None = None,
+    verify: bool = True,
+) -> TelegramAccount:
+    """
+    Create a new Telegram account from an uploaded .session file and JSON metadata.
+    Extracts app_id, app_hash, device profile, and proxy directly from JSON.
+    """
+    from app.modules.accounts.session_converter import (
+        convert_sqlite_session_bytes_to_string,
+        parse_client_json,
+    )
+
+    meta = parse_client_json(json_bytes)
+    session_string = convert_sqlite_session_bytes_to_string(session_bytes)
+
+    effective_proxy = proxy_url or meta.get("proxy_url")
+    effective_api_id = meta.get("api_id")
+    effective_api_hash = meta.get("api_hash")
+
+    account = TelegramAccount(
+        title=title or meta.get("phone") or "Uploaded Session",
+        phone=meta.get("phone"),
+        proxy_url=effective_proxy,
+        session_string=session_string,
+        device_model=meta["device_model"],
+        system_version=meta["system_version"],
+        app_version=meta["app_version"],
+        system_lang_code=meta["system_lang_code"],
+        lang_code=meta["lang_code"],
+        api_id=effective_api_id,
+        api_hash=effective_api_hash,
+    )
+
+    if verify:
+        check = await check_telegram_account_status(
+            session_string=account.session_string,
+            api_id=account.api_id,
+            api_hash=account.api_hash,
+            device_model=account.device_model,
+            system_version=account.system_version,
+            app_version=account.app_version,
+            system_lang_code=account.system_lang_code,
+            lang_code=account.lang_code,
+            proxy_url=account.proxy_url,
+        )
+        account.status = check.status
+        account.last_checked_at = datetime.now(UTC)
+        account.last_error = check.error
+        if check.is_authorized:
+            account.telegram_user_id = check.telegram_user_id
+            account.first_name = check.first_name
+            account.last_name = check.last_name
+            account.username = check.username
+            if check.phone:
+                account.phone = check.phone
+            account.is_premium = check.is_premium
+            if not title:
+                account.title = (
+                    f"@{check.username}"
+                    if check.username
+                    else f"Account {check.telegram_user_id}"
+                )
+
+        if check.flood_wait_seconds:
+            account.flood_wait_until = calculate_flood_wait_until(
+                check.flood_wait_seconds
+            )
+
+    session.add(account)
+    await session.flush()
+    await session.refresh(account)
+    return account

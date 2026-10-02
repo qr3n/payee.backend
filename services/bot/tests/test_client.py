@@ -357,3 +357,83 @@ async def test_client_payments_and_scenarios() -> None:
         assert cancelled.status == "cancelled"
     finally:
         await api_client.close()
+
+
+@pytest.mark.asyncio
+async def test_client_upload_and_phone_auth() -> None:
+    acc_id = str(uuid4())
+    now_str = datetime.now(UTC).isoformat()
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        if request.url.path == "/api/v1/accounts/upload":
+            return httpx.Response(
+                201,
+                json={
+                    "id": acc_id,
+                    "title": "Uploaded Worker",
+                    "status": "active",
+                    "device_model": "Mac",
+                    "system_version": "14",
+                    "app_version": "10",
+                    "api_id": 2496,
+                    "created_at": now_str,
+                    "updated_at": now_str,
+                },
+            )
+        if request.url.path == "/api/v1/accounts/auth/send-code":
+            return httpx.Response(
+                200,
+                json={
+                    "phone_code_hash": "hash_xyz_123",
+                    "timeout_seconds": 120,
+                    "phone": "+79991234567",
+                },
+            )
+        if request.url.path == "/api/v1/accounts/auth/sign-in":
+            return httpx.Response(
+                200,
+                json={
+                    "status": "success",
+                    "message": "Authorized",
+                    "account": {
+                        "id": acc_id,
+                        "title": "Phone Worker",
+                        "status": "active",
+                        "device_model": "Phone",
+                        "system_version": "14",
+                        "app_version": "10",
+                        "api_id": 2040,
+                        "created_at": now_str,
+                        "updated_at": now_str,
+                    },
+                },
+            )
+        return httpx.Response(404)
+
+    transport = httpx.MockTransport(handler)
+    api_client = ApiClient(base_url="http://test-server")
+    api_client._client = httpx.AsyncClient(
+        transport=transport, base_url="http://test-server"
+    )
+
+    try:
+        uploaded = await api_client.upload_account_session(
+            session_bytes=b"fake_session_bytes",
+            session_filename="worker.session",
+            json_bytes=b'{"app_id": 2496}',
+            json_filename="worker.json",
+        )
+        assert uploaded.api_id == 2496
+        assert str(uploaded.id) == acc_id
+
+        sent = await api_client.send_phone_code(phone="+79991234567")
+        assert sent.phone_code_hash == "hash_xyz_123"
+
+        signed = await api_client.sign_in_phone(
+            phone_code_hash="hash_xyz_123", code="54321"
+        )
+        assert signed.status == "success"
+        assert signed.account is not None
+        assert signed.account.title == "Phone Worker"
+    finally:
+        await api_client.close()

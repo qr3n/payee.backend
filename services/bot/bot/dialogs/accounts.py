@@ -1,8 +1,10 @@
+import base64
 from typing import Any
 
+from aiogram.enums import ContentType
 from aiogram.types import CallbackQuery, Message
 from aiogram_dialog import Dialog, DialogManager, Window
-from aiogram_dialog.widgets.input import TextInput
+from aiogram_dialog.widgets.input import MessageInput, TextInput
 from aiogram_dialog.widgets.kbd import (
     Button,
     Cancel,
@@ -45,12 +47,13 @@ async def get_accounts_list(
         for acc in paginated.items:
             badge = format_status_badge(acc.status)
             user_label = f" (@{acc.username})" if acc.username else ""
+            api_info = f" [ID:{acc.api_id}]" if acc.api_id else ""
             accounts_data.append(
                 {
                     "id": str(acc.id),
                     "title": acc.title,
                     "status_badge": badge,
-                    "display_name": f"{badge} | {acc.title}{user_label}",
+                    "display_name": f"{badge} | {acc.title}{user_label}{api_info}",
                 }
             )
 
@@ -87,6 +90,7 @@ async def get_account_detail(
             "full_name": "—",
             "device": "—",
             "proxy": "—",
+            "api_id": "—",
             "is_premium": "—",
             "last_checked": "—",
             "last_error": None,
@@ -106,6 +110,7 @@ async def get_account_detail(
                 "full_name": "—",
                 "device": "—",
                 "proxy": "—",
+                "api_id": "—",
                 "is_premium": "—",
                 "last_checked": "—",
                 "last_error": None,
@@ -125,6 +130,7 @@ async def get_account_detail(
             "full_name": full_name,
             "device": device,
             "proxy": acc.proxy_url or "Прямое подключение (без прокси)",
+            "api_id": str(acc.api_id or "Стандартный"),
             "is_premium": "⭐️ Да" if acc.is_premium else "Нет",
             "last_checked": (
                 acc.last_checked_at.strftime("%Y-%m-%d %H:%M:%S UTC")
@@ -145,6 +151,7 @@ async def get_account_detail(
             "full_name": "—",
             "device": "—",
             "proxy": "—",
+            "api_id": "—",
             "is_premium": "—",
             "last_checked": "—",
             "last_error": str(exc),
@@ -219,6 +226,191 @@ async def on_delete_account(
         await callback.answer(f"Ошибка удаления: {exc}", show_alert=True)
 
 
+# ==============================================================================
+# Phone Auth Flow Callbacks
+# ==============================================================================
+async def on_phone_entered(
+    message: Message,
+    _widget: Any,
+    dialog_manager: DialogManager,
+    text: str,
+) -> None:
+    """Step 1: Send phone number to API and request code."""
+    clean_phone = text.strip().replace(" ", "").replace("-", "")
+    api_client: ApiClient = dialog_manager.middleware_data["api_client"]
+
+    try:
+        resp = await api_client.send_phone_code(phone=clean_phone)
+        dialog_manager.dialog_data["auth_phone"] = clean_phone
+        dialog_manager.dialog_data["auth_phone_code_hash"] = resp.phone_code_hash
+        await dialog_manager.switch_to(AccountsSG.enter_code)
+    except Exception as exc:
+        await message.answer(f"❌ Ошибка отправки кода:\n{exc}\n\nПопробуйте снова:")
+
+
+async def on_code_entered(
+    message: Message,
+    _widget: Any,
+    dialog_manager: DialogManager,
+    text: str,
+) -> None:
+    """Step 2: Submit confirmation code."""
+    code = text.strip()
+    phone_code_hash = dialog_manager.dialog_data.get("auth_phone_code_hash", "")
+    phone = dialog_manager.dialog_data.get("auth_phone")
+    api_client: ApiClient = dialog_manager.middleware_data["api_client"]
+
+    try:
+        res = await api_client.sign_in_phone(
+            phone_code_hash=phone_code_hash,
+            code=code,
+            phone=phone,
+        )
+        if res.status == "needs_2fa":
+            await dialog_manager.switch_to(AccountsSG.enter_2fa_password)
+            return
+
+        dialog_manager.dialog_data["last_action_msg"] = (
+            f"✅ {res.message or 'Аккаунт успешно добавлен!'}"
+        )
+        await dialog_manager.switch_to(AccountsSG.list_accounts)
+    except Exception as exc:
+        await message.answer(
+            f"❌ Ошибка подтверждения кода:\n{exc}\n\nВведите код повторно:"
+        )
+
+
+async def on_2fa_entered(
+    message: Message,
+    _widget: Any,
+    dialog_manager: DialogManager,
+    text: str,
+) -> None:
+    """Step 3: Submit 2FA password."""
+    password = text.strip()
+    phone_code_hash = dialog_manager.dialog_data.get("auth_phone_code_hash", "")
+    phone = dialog_manager.dialog_data.get("auth_phone")
+    api_client: ApiClient = dialog_manager.middleware_data["api_client"]
+
+    try:
+        res = await api_client.sign_in_phone(
+            phone_code_hash=phone_code_hash,
+            code="",
+            phone=phone,
+            two_fa_password=password,
+        )
+        dialog_manager.dialog_data["last_action_msg"] = (
+            f"✅ {res.message or 'Аккаунт успешно добавлен с 2FA!'}"
+        )
+        await dialog_manager.switch_to(AccountsSG.list_accounts)
+    except Exception as exc:
+        await message.answer(
+            f"❌ Ошибка 2FA пароля:\n{exc}\n\nВведите пароль повторно:"
+        )
+
+
+# ==============================================================================
+# File Upload Flow Callbacks (.session + .json)
+# ==============================================================================
+async def on_session_file_received(
+    message: Message,
+    _widget: MessageInput,
+    dialog_manager: DialogManager,
+) -> None:
+    """Handle receiving .session document."""
+    doc = message.document
+    if not doc or not doc.file_name or not doc.file_name.endswith(".session"):
+        await message.answer(
+            "⚠️ Пожалуйста, отправьте файл документа с расширением .session\n"
+            "(например <code>worker.session</code>):"
+        )
+        return
+
+    bot = message.bot
+    if not bot:
+        await message.answer("Ошибка: бот недоступен")
+        return
+
+    buffer = await bot.download(doc)
+    if not buffer:
+        await message.answer("Ошибка скачивания файла")
+        return
+
+    buffer.seek(0)
+    bytes_data = buffer.read()
+    dialog_manager.dialog_data["uploaded_session_b64"] = base64.b64encode(
+        bytes_data
+    ).decode("ascii")
+    dialog_manager.dialog_data["uploaded_session_filename"] = doc.file_name
+    await dialog_manager.switch_to(AccountsSG.upload_json_file)
+
+
+async def on_json_file_received(
+    message: Message,
+    _widget: MessageInput,
+    dialog_manager: DialogManager,
+) -> None:
+    """Handle receiving .json document and finalize upload."""
+    doc = message.document
+    if not doc or not doc.file_name or not doc.file_name.endswith(".json"):
+        await message.answer(
+            "⚠️ Пожалуйста, отправьте файл с расширением .json\n"
+            "(например <code>metadata.json</code>):"
+        )
+        return
+
+    bot = message.bot
+    if not bot:
+        await message.answer("Ошибка: бот недоступен")
+        return
+
+    buffer = await bot.download(doc)
+    if not buffer:
+        await message.answer("Ошибка скачивания файла")
+        return
+
+    buffer.seek(0)
+    json_bytes = buffer.read()
+    session_b64 = dialog_manager.dialog_data.get("uploaded_session_b64", "")
+    session_filename = dialog_manager.dialog_data.get(
+        "uploaded_session_filename", "account.session"
+    )
+
+    if not session_b64:
+        await message.answer("Ошибка: файл .session не найден. Начните сначала.")
+        await dialog_manager.switch_to(AccountsSG.list_accounts)
+        return
+
+    session_bytes = base64.b64decode(session_b64)
+    api_client: ApiClient = dialog_manager.middleware_data["api_client"]
+
+    try:
+        created = await api_client.upload_account_session(
+            session_bytes=session_bytes,
+            session_filename=session_filename,
+            json_bytes=json_bytes,
+            json_filename=doc.file_name,
+            verify=True,
+        )
+        status_text = format_status_badge(created.status)
+        user_info = f" (@{created.username})" if created.username else ""
+        dialog_manager.dialog_data["last_action_msg"] = (
+            f"✅ Сессия '{created.title}' (API ID: {created.api_id}) "
+            f"успешно добавлена! Статус: {status_text}{user_info}"
+        )
+    except Exception as exc:
+        dialog_manager.dialog_data["last_action_msg"] = (
+            f"❌ Ошибка добавления файлов:\n{exc}"
+        )
+    finally:
+        dialog_manager.dialog_data.pop("uploaded_session_b64", None)
+        dialog_manager.dialog_data.pop("uploaded_session_filename", None)
+        await dialog_manager.switch_to(AccountsSG.list_accounts)
+
+
+# ==============================================================================
+# StringSession Manual Callbacks
+# ==============================================================================
 async def on_title_entered(
     message: Message,
     _widget: Any,
@@ -334,8 +526,8 @@ accounts_list_window = Window(
     Row(
         SwitchTo(
             Const("➕ Добавить сессию"),
-            id="to_add_account",
-            state=AccountsSG.add_title,
+            id="to_choose_method",
+            state=AccountsSG.choose_add_method,
         ),
         Cancel(
             Const("🔙 Главное меню"),
@@ -346,12 +538,138 @@ accounts_list_window = Window(
     state=AccountsSG.list_accounts,
 )
 
+choose_add_method_window = Window(
+    Const(
+        "➕ <b>Выберите способ добавления Telegram-сессии:</b>\n\n"
+        "1. <b>Вход по номеру телефона</b>\n"
+        "   Ввод телефона ➔ код из Telegram/SMS ➔ облачный 2FA пароль.\n\n"
+        "2. <b>Загрузка файлов (.session + .json)</b>\n"
+        "   Файл SQLite Telethon + JSON с app_id, app_hash и параметрами.\n\n"
+        "3. <b>Ввести StringSession вручную</b>\n"
+        "   Готовая строка base64 сессии Telethon."
+    ),
+    SwitchTo(
+        Const("📲 1. Вход по номеру телефона"),
+        id="btn_method_phone",
+        state=AccountsSG.enter_phone,
+    ),
+    SwitchTo(
+        Const("📁 2. Загрузить .session + .json"),
+        id="btn_method_files",
+        state=AccountsSG.upload_session_file,
+    ),
+    SwitchTo(
+        Const("🔑 3. Ввести StringSession вручную"),
+        id="btn_method_string",
+        state=AccountsSG.add_title,
+    ),
+    SwitchTo(
+        Const("🔙 Назад к списку"),
+        id="back_to_list_from_choose",
+        state=AccountsSG.list_accounts,
+    ),
+    state=AccountsSG.choose_add_method,
+)
+
+# --- Phone Flow Windows ---
+enter_phone_window = Window(
+    Const(
+        "📱 <b>Вход по номеру телефона (Шаг 1 из 2)</b>\n\n"
+        "Введите номер телефона (+7...):\n"
+        "Например: <code>+79991234567</code>"
+    ),
+    TextInput(
+        id="input_auth_phone",
+        on_success=on_phone_entered,
+    ),
+    SwitchTo(
+        Const("🔙 Отмена"),
+        id="cancel_phone_flow",
+        state=AccountsSG.list_accounts,
+    ),
+    state=AccountsSG.enter_phone,
+)
+
+enter_code_window = Window(
+    Format(
+        "🔑 <b>Ввод кода подтверждения</b>\n\n"
+        "Код отправлен на <b>{dialog_data[auth_phone]}</b> в Telegram или SMS.\n\n"
+        "Введите полученный код:"
+    ),
+    TextInput(
+        id="input_auth_code",
+        on_success=on_code_entered,
+    ),
+    SwitchTo(
+        Const("🔙 Отмена"),
+        id="cancel_code_flow",
+        state=AccountsSG.list_accounts,
+    ),
+    state=AccountsSG.enter_code,
+)
+
+enter_2fa_password_window = Window(
+    Const(
+        "🔐 <b>Двухфакторная аутентификация (2FA)</b>\n\n"
+        "На аккаунте установлен облачный пароль.\n"
+        "Введите пароль 2FA для завершения входа:"
+    ),
+    TextInput(
+        id="input_auth_2fa",
+        on_success=on_2fa_entered,
+    ),
+    SwitchTo(
+        Const("🔙 Отмена"),
+        id="cancel_2fa_flow",
+        state=AccountsSG.list_accounts,
+    ),
+    state=AccountsSG.enter_2fa_password,
+)
+
+# --- File Upload Flow Windows ---
+upload_session_file_window = Window(
+    Const(
+        "📁 <b>Загрузка файлов (Шаг 1 из 2)</b>\n\n"
+        "Отправьте файл <code>.session</code> (например: <code>worker.session</code>) "
+        "как документ в чат:"
+    ),
+    MessageInput(
+        on_session_file_received,
+        content_types=[ContentType.DOCUMENT],
+    ),
+    SwitchTo(
+        Const("🔙 Отмена"),
+        id="cancel_file_upload_1",
+        state=AccountsSG.list_accounts,
+    ),
+    state=AccountsSG.upload_session_file,
+)
+
+upload_json_file_window = Window(
+    Format(
+        "📄 <b>Загрузка метаданных (Шаг 2 из 2)</b>\n\n"
+        "Файл сессии: <b>{dialog_data[uploaded_session_filename]}</b>\n\n"
+        "Теперь отправьте файл <code>.json</code> с метаданными клиента как документ:"
+    ),
+    MessageInput(
+        on_json_file_received,
+        content_types=[ContentType.DOCUMENT],
+    ),
+    SwitchTo(
+        Const("🔙 Отмена"),
+        id="cancel_file_upload_2",
+        state=AccountsSG.list_accounts,
+    ),
+    state=AccountsSG.upload_json_file,
+)
+
 account_detail_window = Window(
     Format("🔔 <b>{detail_msg}</b>\n\n", when="detail_msg"),
     Format(
         "📱 <b>Информация об аккаунте</b>\n\n"
         "<b>Название:</b> {title}\n"
         "<b>Статус:</b> {status}\n"
+        "<b>API ID:</b> <code>{api_id}</code>\n"
         "<b>ID:</b> <code>{id}</code>\n"
         "<b>Telegram User ID:</b> <code>{telegram_user_id}</code>\n"
         "<b>Юзернейм:</b> {username}\n"
@@ -384,6 +702,7 @@ account_detail_window = Window(
     state=AccountsSG.account_detail,
 )
 
+# --- Manual StringSession Windows ---
 add_title_window = Window(
     Const(
         "➕ <b>Добавление Telegram сессии (Шаг 1 из 3)</b>\n\n"
@@ -447,6 +766,12 @@ add_proxy_window = Window(
 
 accounts_dialog = Dialog(
     accounts_list_window,
+    choose_add_method_window,
+    enter_phone_window,
+    enter_code_window,
+    enter_2fa_password_window,
+    upload_session_file_window,
+    upload_json_file_window,
     account_detail_window,
     add_title_window,
     add_session_window,

@@ -50,6 +50,8 @@ class TelegramAccountRead(BaseModel):
     device_model: str
     system_version: str
     app_version: str
+    api_id: int | None = None
+    api_hash: str | None = None
     telegram_user_id: int | None = None
     first_name: str | None = None
     last_name: str | None = None
@@ -69,7 +71,26 @@ class TelegramAccountCreate(BaseModel):
     session_string: str = Field(min_length=10)
     phone: str | None = None
     proxy_url: str | None = None
+    api_id: int | None = None
+    api_hash: str | None = None
     verify_on_create: bool = True
+
+
+class PhoneCodeResponse(BaseModel):
+    """Response returned after Telegram sends login code."""
+
+    phone_code_hash: str
+    timeout_seconds: int = 120
+    phone: str
+
+
+class PhoneSignInResponse(BaseModel):
+    """Response returned upon sign-in attempt."""
+
+    status: str
+    account: TelegramAccountRead | None = None
+    message: str | None = None
+    phone_code_hash: str | None = None
 
 
 class TelegramAccountCheckResponse(BaseModel):

@@ -10,6 +10,8 @@ from bot.client.schemas import (
     PaginatedResponse,
     PaymentCreate,
     PaymentRead,
+    PhoneCodeResponse,
+    PhoneSignInResponse,
     ReadinessResponse,
     ScenarioRead,
     TelegramAccountCheckResponse,
@@ -99,6 +101,8 @@ class ApiClient:
         session_string: str,
         phone: str | None = None,
         proxy_url: str | None = None,
+        api_id: int | None = None,
+        api_hash: str | None = None,
         verify_on_create: bool = True,
     ) -> TelegramAccountRead:
         """Register and optionally verify a new Telegram MTProto session."""
@@ -108,11 +112,89 @@ class ApiClient:
             session_string=session_string,
             phone=phone,
             proxy_url=proxy_url,
+            api_id=api_id,
+            api_hash=api_hash,
             verify_on_create=verify_on_create,
         ).model_dump(exclude_none=True)
         response = await client.post("/api/v1/accounts/", json=payload)
         response.raise_for_status()
         return TelegramAccountRead.model_validate(response.json())
+
+    async def upload_account_session(
+        self,
+        session_bytes: bytes,
+        session_filename: str,
+        json_bytes: bytes,
+        json_filename: str,
+        title: str | None = None,
+        proxy_url: str | None = None,
+        verify: bool = True,
+    ) -> TelegramAccountRead:
+        """Upload .session file and .json client metadata."""
+        client = await self.get_client()
+        files = {
+            "session_file": (
+                session_filename,
+                session_bytes,
+                "application/octet-stream",
+            ),
+            "json_file": (json_filename, json_bytes, "application/json"),
+        }
+        data: dict[str, Any] = {"verify": str(verify).lower()}
+        if title:
+            data["title"] = title
+        if proxy_url:
+            data["proxy_url"] = proxy_url
+
+        response = await client.post("/api/v1/accounts/upload", files=files, data=data)
+        response.raise_for_status()
+        return TelegramAccountRead.model_validate(response.json())
+
+    async def send_phone_code(
+        self,
+        phone: str,
+        title: str | None = None,
+        api_id: int | None = None,
+        api_hash: str | None = None,
+        proxy_url: str | None = None,
+    ) -> PhoneCodeResponse:
+        """Request confirmation code for phone number."""
+        client = await self.get_client()
+        payload: dict[str, Any] = {"phone": phone}
+        if title:
+            payload["title"] = title
+        if api_id:
+            payload["api_id"] = api_id
+        if api_hash:
+            payload["api_hash"] = api_hash
+        if proxy_url:
+            payload["proxy_url"] = proxy_url
+
+        response = await client.post("/api/v1/accounts/auth/send-code", json=payload)
+        response.raise_for_status()
+        return PhoneCodeResponse.model_validate(response.json())
+
+    async def sign_in_phone(
+        self,
+        phone_code_hash: str,
+        code: str,
+        phone: str | None = None,
+        two_fa_password: str | None = None,
+    ) -> PhoneSignInResponse:
+        """Complete sign in using phone code or 2FA password."""
+        client = await self.get_client()
+        payload: dict[str, Any] = {
+            "phone_code_hash": phone_code_hash,
+            "code": code,
+        }
+        if phone:
+            payload["phone"] = phone
+        if two_fa_password:
+            payload["two_fa_password"] = two_fa_password
+
+        response = await client.post("/api/v1/accounts/auth/sign-in", json=payload)
+        response.raise_for_status()
+        return PhoneSignInResponse.model_validate(response.json())
 
     async def check_account(
         self, account_id: str | UUID

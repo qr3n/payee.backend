@@ -14,6 +14,18 @@ class AccountsSG(StatesGroup):
 
     list_accounts = State()
     account_detail = State()
+    choose_add_method = State()
+
+    # Flow 1: Phone Login (Phone -> Code -> 2FA Cloud Password)
+    enter_phone = State()
+    enter_code = State()
+    enter_2fa_password = State()
+
+    # Flow 2: File Upload (.session + .json)
+    upload_session_file = State()
+    upload_json_file = State()
+
+    # Flow 3: StringSession manual
     add_title = State()
     add_session = State()
     add_proxy = State()

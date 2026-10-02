@@ -1,3 +1,4 @@
+import time
 from decimal import Decimal, InvalidOperation
 from typing import Any
 
@@ -100,6 +101,7 @@ async def get_payment_result(
             "expires_at": "—",
             "account_id": "—",
             "meta_info": "—",
+            "generation_time": "—",
             "action_msg": dialog_manager.dialog_data.pop("payment_action_msg", None),
         }
 
@@ -116,11 +118,18 @@ async def get_payment_result(
                 "expires_at": "—",
                 "account_id": "—",
                 "meta_info": "—",
+                "generation_time": "—",
                 "action_msg": "Платеж не найден в базе данных",
             }
 
-        stars = payment.meta.get("calculated_stars")
+        stars = payment.meta.get("stars_count") or payment.meta.get("calculated_stars")
         meta_info = f"Звезд: {stars} ⭐️" if stars else "—"
+
+        gen_time = dialog_manager.dialog_data.get("generation_time")
+        if not gen_time and payment.meta.get("generation_time_sec") is not None:
+            gen_time = f"{payment.meta.get('generation_time_sec')} сек."
+        if not gen_time:
+            gen_time = "—"
 
         return {
             "id": str(payment.id),
@@ -132,6 +141,7 @@ async def get_payment_result(
             "expires_at": payment.expires_at.strftime("%Y-%m-%d %H:%M:%S UTC"),
             "account_id": str(payment.account_id),
             "meta_info": meta_info,
+            "generation_time": gen_time,
             "action_msg": dialog_manager.dialog_data.pop("payment_action_msg", None),
         }
     except Exception as exc:
@@ -145,6 +155,7 @@ async def get_payment_result(
             "expires_at": "—",
             "account_id": "—",
             "meta_info": "—",
+            "generation_time": "—",
             "action_msg": f"❌ Ошибка: {exc}",
         }
 
@@ -170,7 +181,7 @@ async def execute_payment_creation(
     amount: Decimal,
     user_id: int,
 ) -> None:
-    """Helper to call backend create_payment API."""
+    """Helper to call backend create_payment API and measure execution time."""
     scenario_id = dialog_manager.dialog_data.get("selected_scenario_id", "starslly_bot")
     client_user_id = f"tg_admin_{user_id}"
 
@@ -181,21 +192,27 @@ async def execute_payment_creation(
             amount=str(amount),
             client_user_id=client_user_id,
         )
+        t_start = time.perf_counter()
         payment = await api_client.create_payment(
             client_user_id=client_user_id,
             amount=amount,
             scenario_id=scenario_id,
             currency="RUB",
         )
+        duration_sec = round(time.perf_counter() - t_start, 2)
+        gen_time_str = f"{duration_sec} сек."
+
         logger.info(
             "bot_scenario_payment_created",
             payment_id=str(payment.id),
             status=payment.status,
             link=payment.payment_link,
+            duration_sec=duration_sec,
         )
         dialog_manager.dialog_data["last_payment_id"] = str(payment.id)
+        dialog_manager.dialog_data["generation_time"] = gen_time_str
         dialog_manager.dialog_data["payment_action_msg"] = (
-            "✅ Платеж успешно инициирован и ссылка сформирована!"
+            f"✅ Ссылка сгенерирована за <b>{gen_time_str}</b>!"
         )
         await dialog_manager.switch_to(ScenariosSG.payment_result)
     except Exception as exc:
@@ -372,6 +389,7 @@ payment_result_window = Window(
         "<b>Сценарий:</b> <code>{scenario_id}</code>\n"
         "<b>Сумма:</b> <b>{amount}</b>\n"
         "<b>Статус:</b> {status}\n"
+        "<b>Время генерации:</b> ⏱ <code>{generation_time}</code>\n"
         "<b>Расчет:</b> {meta_info}\n"
         "<b>Истекает:</b> {expires_at}\n"
         "<b>Аккаунт в пуле:</b> <code>{account_id}</code>\n\n"

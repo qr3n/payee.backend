@@ -4,6 +4,7 @@ Provides reactive account acquisition, 30m TTL locks, user re-use,
 and scenario dispatch. Follows Unit of Work: NEVER calls session.commit().
 """
 
+import time
 from collections.abc import Sequence
 from datetime import UTC, datetime, timedelta
 from uuid import UUID
@@ -123,9 +124,15 @@ async def create_payment(
         account=account,
         meta=payment_in.meta,
     )
+    t_start = time.perf_counter()
     result = await scenario.create_payment(ctx)
+    duration_sec = round(time.perf_counter() - t_start, 2)
 
-    merged_meta = {**payment_in.meta, **result.meta}
+    merged_meta = {
+        **payment_in.meta,
+        **result.meta,
+        "generation_time_sec": duration_sec,
+    }
 
     # 3. Create new payment record
     payment = Payment(

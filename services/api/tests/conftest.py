@@ -15,6 +15,7 @@ from app.api.deps import get_db, get_redis
 from app.main import app
 from app.modules.accounts.models import TelegramAccount  # noqa: F401
 from app.modules.items import Item  # noqa: F401
+from app.modules.payments.models import Payment  # noqa: F401
 
 _test_container = None
 _db_url = os.getenv("TEST_DATABASE_URL")

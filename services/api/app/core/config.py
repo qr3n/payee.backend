@@ -78,6 +78,10 @@ class Settings(BaseSettings):
     STARSHOPPIK_BOT_USERNAME: str = "StarShoppik_bot"
     STARSHOPPIK_CHANNEL_USERNAME: str = "Star_Shopikk"
 
+    # HelperStars Bot Payment Scenario Defaults
+    HELPERSTARS_BOT_USERNAME: str = "HelperStars_Robot"
+    HELPERSTARS_CHANNEL_USERNAME: str = "HelperStars_Rezerv"
+
     @property
     def redis_uri(self) -> str:
         """Constructs an async Redis connection string."""

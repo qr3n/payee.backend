@@ -7,6 +7,9 @@ from app.modules.payments.scenarios.base import (
     ScenarioContext,
     ScenarioResult,
 )
+from app.modules.payments.scenarios.helperstars_scenario import (
+    HelperStarsBotScenario,
+)
 from app.modules.payments.scenarios.mock_scenario import MockBotScenario
 from app.modules.payments.scenarios.registry import (
     ScenarioRegistry,
@@ -24,6 +27,7 @@ from app.modules.payments.scenarios.starslly_scenario import (
 
 __all__ = [
     "BasePaymentScenario",
+    "HelperStarsBotScenario",
     "MockBotScenario",
     "ScenarioContext",
     "ScenarioRegistry",

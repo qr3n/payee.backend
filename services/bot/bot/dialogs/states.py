@@ -9,16 +9,19 @@ class MainSG(StatesGroup):
     about = State()
 
 
-class ItemsSG(StatesGroup):
-    """States for the items CRUD and interaction dialog flow."""
+class AccountsSG(StatesGroup):
+    """States for Telegram MTProto accounts management."""
 
-    list_items = State()
-    item_detail = State()
-    create_title = State()
-    create_description = State()
+    list_accounts = State()
+    account_detail = State()
+    add_title = State()
+    add_session = State()
+    add_proxy = State()
 
 
-class AISG(StatesGroup):
-    """States for the DeepSeek AI chat dialog flow."""
+class ScenariosSG(StatesGroup):
+    """States for scenario testing and payment generation."""
 
-    chat = State()
+    list_scenarios = State()
+    enter_amount = State()
+    payment_result = State()

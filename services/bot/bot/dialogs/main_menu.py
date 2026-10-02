@@ -5,7 +5,7 @@ from aiogram_dialog.widgets.kbd import Row, Start, SwitchTo
 from aiogram_dialog.widgets.text import Const, Format
 
 from bot.client.api import ApiClient
-from bot.dialogs.states import AISG, ItemsSG, MainSG
+from bot.dialogs.states import AccountsSG, MainSG, ScenariosSG
 
 
 async def get_system_status(
@@ -40,21 +40,22 @@ async def get_system_status(
 
 main_menu_window = Window(
     Const(
-        "🚀 <b>Главное меню Telegram Bot</b>\n\n"
-        "Бот построен на <b>aiogram 3</b> и <b>aiogram-dialog</b>.\n"
-        "Архитектура: бот выступает в роли клиента (BFF/фронтенда),\n"
-        "а FastAPI бэкенд является единым источником правды (SSOT).\n\n"
+        "🚀 <b>Панель управления платежным сервисом</b>\n\n"
+        "Бот позволяет управлять пулом Telegram MTProto аккаунтов,\n"
+        "проверять их статус и тестировать сценарии создания платежей.\n\n"
         "Выберите раздел для продолжения:"
     ),
-    Start(
-        Const("📦 Управление Items"),
-        id="to_items",
-        state=ItemsSG.list_items,
-    ),
-    Start(
-        Const("🤖 DeepSeek AI Чат"),
-        id="to_ai_chat",
-        state=AISG.chat,
+    Row(
+        Start(
+            Const("📱 Управление сессиями"),
+            id="to_accounts",
+            state=AccountsSG.list_accounts,
+        ),
+        Start(
+            Const("⚡ Тестирование сценариев"),
+            id="to_scenarios",
+            state=ScenariosSG.list_scenarios,
+        ),
     ),
     Row(
         SwitchTo(
@@ -63,7 +64,7 @@ main_menu_window = Window(
             state=MainSG.system_status,
         ),
         SwitchTo(
-            Const("ℹ️ О проекте"),
+            Const("ℹ️ О сервисе"),
             id="to_about",
             state=MainSG.about,
         ),
@@ -92,13 +93,12 @@ system_status_window = Window(
 
 about_window = Window(
     Const(
-        "ℹ️ <b>Архитектура проекта</b>\n\n"
+        "ℹ️ <b>Архитектура платежного сервиса</b>\n\n"
         "• <b>FastAPI + Granian + uvloop</b> — асинхронный REST API\n"
+        "• <b>Telethon MTProto</b> — управление сессиями и ботами\n"
         "• <b>SQLModel + PostgreSQL 17</b> — персистентность данных\n"
-        "• <b>Taskiq + Redis</b> — фоновые задачи (Workers)\n"
-        "• <b>Redis Storage</b> — изолированное хранилище FSM\n"
-        "• <b>Traefik v3</b> — Reverse Proxy (Webhook / Polling)\n"
-        "• <b>BFF Pattern</b> — Бот общается с API по HTTP"
+        "• <b>Taskiq + Redis</b> — таймеры и истечение неоплаченных счетов\n"
+        "• <b>aiogram 3 + aiogram-dialog</b> — интерактивная админ-панель"
     ),
     SwitchTo(
         Const("🔙 Назад в меню"),

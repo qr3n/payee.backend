@@ -1,12 +1,21 @@
 import json
 from datetime import UTC, datetime
+from decimal import Decimal
 from uuid import uuid4
 
 import httpx
 import pytest
 
 from bot.client.api import ApiClient
-from bot.client.schemas import HealthCheckResponse, ReadinessResponse
+from bot.client.schemas import (
+    HealthCheckResponse,
+    PaginatedResponse,
+    PaymentRead,
+    ReadinessResponse,
+    ScenarioRead,
+    TelegramAccountCheckResponse,
+    TelegramAccountRead,
+)
 
 
 @pytest.mark.asyncio
@@ -28,7 +37,6 @@ async def test_client_get_health() -> None:
 
     transport = httpx.MockTransport(handler)
     api_client = ApiClient(base_url="http://test-server")
-    # Inject mock client
     api_client._client = httpx.AsyncClient(
         transport=transport, base_url="http://test-server"
     )
@@ -75,28 +83,34 @@ async def test_client_get_readiness() -> None:
 
 
 @pytest.mark.asyncio
-async def test_client_list_items() -> None:
-    item_id = str(uuid4())
+async def test_client_list_accounts() -> None:
+    acc_id = str(uuid4())
     now_str = datetime.now(UTC).isoformat()
 
     def handler(request: httpx.Request) -> httpx.Response:
-        assert request.url.path == "/api/v1/items/"
+        assert request.url.path == "/api/v1/accounts/"
         return httpx.Response(
             200,
             json={
                 "items": [
                     {
-                        "id": item_id,
-                        "title": "Test Item",
-                        "description": "Test Desc",
-                        "is_active": True,
+                        "id": acc_id,
+                        "title": "Worker 1",
+                        "phone": "+1234567890",
+                        "proxy_url": None,
+                        "status": "active",
+                        "device_model": "iPhone 15",
+                        "system_version": "iOS 17.5",
+                        "app_version": "10.14.0",
+                        "telegram_user_id": 999888,
+                        "username": "worker_one",
                         "created_at": now_str,
                         "updated_at": now_str,
                     }
                 ],
                 "total": 1,
                 "page": 1,
-                "size": 10,
+                "size": 50,
                 "pages": 1,
             },
         )
@@ -108,20 +122,36 @@ async def test_client_list_items() -> None:
     )
 
     try:
-        paginated = await api_client.list_items()
+        paginated = await api_client.list_accounts()
+        assert isinstance(paginated, PaginatedResponse)
         assert paginated.total == 1
         assert len(paginated.items) == 1
-        assert paginated.items[0].title == "Test Item"
+        assert paginated.items[0].title == "Worker 1"
+        assert paginated.items[0].username == "worker_one"
     finally:
         await api_client.close()
 
 
 @pytest.mark.asyncio
-async def test_client_get_item_not_found() -> None:
-    item_id = str(uuid4())
+async def test_client_get_account() -> None:
+    acc_id = str(uuid4())
+    now_str = datetime.now(UTC).isoformat()
 
     def handler(request: httpx.Request) -> httpx.Response:
-        assert request.url.path == f"/api/v1/items/{item_id}"
+        if request.url.path == f"/api/v1/accounts/{acc_id}":
+            return httpx.Response(
+                200,
+                json={
+                    "id": acc_id,
+                    "title": "Worker 1",
+                    "status": "active",
+                    "device_model": "Pixel 8",
+                    "system_version": "Android 14",
+                    "app_version": "10.14.0",
+                    "created_at": now_str,
+                    "updated_at": now_str,
+                },
+            )
         return httpx.Response(404, json={"detail": "Not found"})
 
     transport = httpx.MockTransport(handler)
@@ -131,29 +161,36 @@ async def test_client_get_item_not_found() -> None:
     )
 
     try:
-        item = await api_client.get_item(item_id)
-        assert item is None
+        acc = await api_client.get_account(acc_id)
+        assert acc is not None
+        assert str(acc.id) == acc_id
+        assert acc.title == "Worker 1"
+
+        missing = await api_client.get_account(uuid4())
+        assert missing is None
     finally:
         await api_client.close()
 
 
 @pytest.mark.asyncio
-async def test_client_create_item() -> None:
-    item_id = str(uuid4())
+async def test_client_create_account() -> None:
+    acc_id = str(uuid4())
     now_str = datetime.now(UTC).isoformat()
 
     def handler(request: httpx.Request) -> httpx.Response:
-        assert request.url.path == "/api/v1/items/"
+        assert request.url.path == "/api/v1/accounts/"
         assert request.method == "POST"
         body = json.loads(request.content)
-        assert body["title"] == "New Item"
+        assert body["title"] == "New Session"
         return httpx.Response(
             201,
             json={
-                "id": item_id,
+                "id": acc_id,
                 "title": body["title"],
-                "description": body.get("description"),
-                "is_active": True,
+                "status": "pending",
+                "device_model": "Desktop",
+                "system_version": "Windows 11",
+                "app_version": "5.1.0",
                 "created_at": now_str,
                 "updated_at": now_str,
             },
@@ -166,21 +203,40 @@ async def test_client_create_item() -> None:
     )
 
     try:
-        created = await api_client.create_item("New Item", "Description")
-        assert str(created.id) == item_id
-        assert created.title == "New Item"
+        acc = await api_client.create_account(
+            title="New Session",
+            session_string="1ApWqtestvalidsessionstringhere...",
+        )
+        assert isinstance(acc, TelegramAccountRead)
+        assert acc.title == "New Session"
     finally:
         await api_client.close()
 
 
 @pytest.mark.asyncio
-async def test_client_analyze_item() -> None:
-    item_id = str(uuid4())
+async def test_client_check_and_delete_account() -> None:
+    acc_id = str(uuid4())
+    now_str = datetime.now(UTC).isoformat()
 
     def handler(request: httpx.Request) -> httpx.Response:
-        assert request.url.path == f"/api/v1/items/{item_id}/analyze"
-        assert request.method == "POST"
-        return httpx.Response(202, json={"task_id": "task-uuid-12345"})
+        if request.url.path == f"/api/v1/accounts/{acc_id}/check":
+            return httpx.Response(
+                200,
+                json={
+                    "account_id": acc_id,
+                    "status": "active",
+                    "is_authorized": True,
+                    "telegram_user_id": 123456,
+                    "username": "checked_user",
+                    "checked_at": now_str,
+                },
+            )
+        if (
+            request.url.path == f"/api/v1/accounts/{acc_id}"
+            and request.method == "DELETE"
+        ):
+            return httpx.Response(204)
+        return httpx.Response(404)
 
     transport = httpx.MockTransport(handler)
     api_client = ApiClient(base_url="http://test-server")
@@ -189,36 +245,89 @@ async def test_client_analyze_item() -> None:
     )
 
     try:
-        result = await api_client.analyze_item(item_id)
-        assert result["task_id"] == "task-uuid-12345"
+        check_res = await api_client.check_account(acc_id)
+        assert isinstance(check_res, TelegramAccountCheckResponse)
+        assert check_res.is_authorized is True
+        assert check_res.username == "checked_user"
+
+        await api_client.delete_account(acc_id)
     finally:
         await api_client.close()
 
 
 @pytest.mark.asyncio
-async def test_client_ask_ai() -> None:
+async def test_client_payments_and_scenarios() -> None:
+    pay_id = str(uuid4())
+    acc_id = str(uuid4())
+    now_str = datetime.now(UTC).isoformat()
+
     def handler(request: httpx.Request) -> httpx.Response:
-        assert request.url.path == "/api/v1/ai/chat"
-        assert request.method == "POST"
-        body = json.loads(request.content)
-        assert body["prompt"] == "Hello AI"
-        return httpx.Response(
-            200,
-            json={
-                "conversation_id": "conv-123",
-                "response": "Hello human!",
-                "model": "deepseek-v3",
-                "search_enabled": False,
-                "file_ids": [],
-                "citations": [
+        if request.url.path == "/api/v1/payments/scenarios":
+            return httpx.Response(
+                200,
+                json=[
                     {
-                        "title": "Example Source",
-                        "url": "https://example.com",
-                        "snippet": "Example snippet",
+                        "scenario_id": "starslly_bot",
+                        "name": "@starslly_bot",
+                        "description": "Buy Telegram Stars",
                     }
                 ],
-            },
-        )
+            )
+        if request.url.path == "/api/v1/payments/" and request.method == "POST":
+            return httpx.Response(
+                201,
+                json={
+                    "id": pay_id,
+                    "client_user_id": "user123",
+                    "account_id": acc_id,
+                    "scenario_id": "starslly_bot",
+                    "amount": "495.00",
+                    "currency": "RUB",
+                    "status": "pending",
+                    "payment_link": "https://t.me/$invoice123",
+                    "expires_at": now_str,
+                    "meta": {"calculated_stars": 300},
+                    "created_at": now_str,
+                    "updated_at": now_str,
+                },
+            )
+        if request.url.path == f"/api/v1/payments/{pay_id}/paid":
+            return httpx.Response(
+                200,
+                json={
+                    "id": pay_id,
+                    "client_user_id": "user123",
+                    "account_id": acc_id,
+                    "scenario_id": "starslly_bot",
+                    "amount": "495.00",
+                    "currency": "RUB",
+                    "status": "paid",
+                    "payment_link": "https://t.me/$invoice123",
+                    "expires_at": now_str,
+                    "paid_at": now_str,
+                    "created_at": now_str,
+                    "updated_at": now_str,
+                },
+            )
+        if request.url.path == f"/api/v1/payments/{pay_id}/cancel":
+            return httpx.Response(
+                200,
+                json={
+                    "id": pay_id,
+                    "client_user_id": "user123",
+                    "account_id": acc_id,
+                    "scenario_id": "starslly_bot",
+                    "amount": "495.00",
+                    "currency": "RUB",
+                    "status": "cancelled",
+                    "payment_link": "https://t.me/$invoice123",
+                    "expires_at": now_str,
+                    "cancelled_at": now_str,
+                    "created_at": now_str,
+                    "updated_at": now_str,
+                },
+            )
+        return httpx.Response(404)
 
     transport = httpx.MockTransport(handler)
     api_client = ApiClient(base_url="http://test-server")
@@ -227,37 +336,24 @@ async def test_client_ask_ai() -> None:
     )
 
     try:
-        resp = await api_client.ask_ai("Hello AI")
-        assert resp.conversation_id == "conv-123"
-        assert resp.response == "Hello human!"
-        assert len(resp.citations) == 1
-        assert resp.citations[0].title == "Example Source"
-    finally:
-        await api_client.close()
+        scenarios = await api_client.list_scenarios()
+        assert len(scenarios) == 1
+        assert isinstance(scenarios[0], ScenarioRead)
+        assert scenarios[0].scenario_id == "starslly_bot"
 
-
-@pytest.mark.asyncio
-async def test_client_reset_ai_conversation() -> None:
-    def handler(request: httpx.Request) -> httpx.Response:
-        assert request.url.path == "/api/v1/ai/conversations/conv-123"
-        assert request.method == "DELETE"
-        return httpx.Response(
-            200,
-            json={
-                "conversation_id": "conv-123",
-                "reset": True,
-            },
+        payment = await api_client.create_payment(
+            client_user_id="user123",
+            amount=Decimal("495"),
+            scenario_id="starslly_bot",
         )
+        assert isinstance(payment, PaymentRead)
+        assert str(payment.id) == pay_id
+        assert payment.payment_link == "https://t.me/$invoice123"
 
-    transport = httpx.MockTransport(handler)
-    api_client = ApiClient(base_url="http://test-server")
-    api_client._client = httpx.AsyncClient(
-        transport=transport, base_url="http://test-server"
-    )
+        paid = await api_client.mark_payment_paid(pay_id)
+        assert paid.status == "paid"
 
-    try:
-        resp = await api_client.reset_ai_conversation("conv-123")
-        assert resp.conversation_id == "conv-123"
-        assert resp.reset is True
+        cancelled = await api_client.cancel_payment(pay_id)
+        assert cancelled.status == "cancelled"
     finally:
         await api_client.close()

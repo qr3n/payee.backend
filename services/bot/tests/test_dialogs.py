@@ -1,4 +1,5 @@
 from datetime import UTC, datetime
+from decimal import Decimal
 from unittest.mock import AsyncMock, MagicMock
 from uuid import uuid4
 
@@ -6,21 +7,16 @@ import pytest
 from aiogram_dialog import DialogManager
 
 from bot.client.schemas import (
-    AIChatResponse,
-    AICitation,
     HealthCheckResponse,
-    ItemRead,
     PaginatedResponse,
+    PaymentRead,
     ReadinessResponse,
+    ScenarioRead,
+    TelegramAccountRead,
 )
-from bot.dialogs.ai import (
-    get_ai_chat_data,
-    on_prompt_entered,
-    on_reset_conversation,
-    on_toggle_search,
-)
-from bot.dialogs.items import get_item_detail, get_items_list
+from bot.dialogs.accounts import get_account_detail, get_accounts_list
 from bot.dialogs.main_menu import get_system_status
+from bot.dialogs.scenarios import get_payment_result, get_scenarios_list
 
 
 @pytest.mark.asyncio
@@ -63,134 +59,126 @@ async def test_get_system_status_error() -> None:
 
 
 @pytest.mark.asyncio
-async def test_get_items_list() -> None:
+async def test_get_accounts_list() -> None:
     api_client = AsyncMock()
-    item_id = uuid4()
+    acc_id = uuid4()
     now = datetime.now(UTC)
-    api_client.list_items.return_value = PaginatedResponse[ItemRead](
+    api_client.list_accounts.return_value = PaginatedResponse[TelegramAccountRead](
         items=[
-            ItemRead(
-                id=item_id,
-                title="Gadget",
-                description="Cool gadget",
-                is_active=True,
+            TelegramAccountRead(
+                id=acc_id,
+                title="Main Worker",
+                phone="+123456789",
+                status="active",
+                device_model="iPhone 15",
+                system_version="iOS 17.5",
+                app_version="10.14.0",
+                telegram_user_id=12345,
+                username="main_worker",
+                is_premium=True,
                 created_at=now,
                 updated_at=now,
             )
         ],
         total=1,
         page=1,
-        size=10,
+        size=50,
         pages=1,
     )
 
     manager = MagicMock(spec=DialogManager)
     manager.dialog_data = {}
 
-    result = await get_items_list(dialog_manager=manager, api_client=api_client)
+    result = await get_accounts_list(dialog_manager=manager, api_client=api_client)
 
     assert result["total"] == 1
-    assert result["has_items"] is True
-    assert len(result["items"]) == 1
-    assert result["items"][0]["title"] == "Gadget"
+    assert result["has_accounts"] is True
+    assert len(result["accounts"]) == 1
+    assert "Main Worker" in result["accounts"][0]["display_name"]
+    assert "🟢" in result["accounts"][0]["status_badge"]
 
 
 @pytest.mark.asyncio
-async def test_get_item_detail() -> None:
+async def test_get_account_detail() -> None:
     api_client = AsyncMock()
-    item_id = uuid4()
+    acc_id = uuid4()
     now = datetime.now(UTC)
-    api_client.get_item.return_value = ItemRead(
-        id=item_id,
-        title="Specific Item",
-        description="Detailed description",
-        is_active=True,
+    api_client.get_account.return_value = TelegramAccountRead(
+        id=acc_id,
+        title="Main Worker",
+        phone="+123456789",
+        status="active",
+        device_model="iPhone 15",
+        system_version="iOS 17.5",
+        app_version="10.14.0",
+        telegram_user_id=12345,
+        username="main_worker",
+        is_premium=True,
         created_at=now,
         updated_at=now,
     )
 
     manager = MagicMock(spec=DialogManager)
-    manager.dialog_data = {"selected_item_id": str(item_id)}
+    manager.dialog_data = {"selected_account_id": str(acc_id)}
 
-    result = await get_item_detail(dialog_manager=manager, api_client=api_client)
+    result = await get_account_detail(dialog_manager=manager, api_client=api_client)
 
-    assert result["id"] == str(item_id)
-    assert result["title"] == "Specific Item"
-    assert result["description"] == "Detailed description"
-    assert "✅" in result["status"]
-
-
-@pytest.mark.asyncio
-async def test_get_ai_chat_data() -> None:
-    manager = MagicMock(spec=DialogManager)
-    manager.dialog_data = {
-        "conversation_id": "test-conv-12345",
-        "search_enabled": True,
-        "last_prompt": "What is Python?",
-        "last_response": "Python is a programming language.",
-        "citations": [{"title": "Docs", "url": "https://python.org"}],
-    }
-
-    result = await get_ai_chat_data(dialog_manager=manager)
-    assert result["conv_id_short"] == "test-con"
-    assert "🟢" in result["search_status"]
-    assert "What is Python?" in result["dialogue_text"]
-    assert "https://python.org" in result["citations_text"]
+    assert result["id"] == str(acc_id)
+    assert result["title"] == "Main Worker"
+    assert result["username"] == "@main_worker"
+    assert "⭐️ Да" in result["is_premium"]
 
 
 @pytest.mark.asyncio
-async def test_on_prompt_entered() -> None:
+async def test_get_scenarios_list() -> None:
     api_client = AsyncMock()
-    api_client.ask_ai.return_value = AIChatResponse(
-        conversation_id="conv-abc",
-        response="DeepSeek response",
-        model="deepseek-v3",
-        search_enabled=False,
-        file_ids=[],
-        citations=[AICitation(title="Source", url="https://example.com")],
-    )
+    api_client.list_scenarios.return_value = [
+        ScenarioRead(
+            scenario_id="starslly_bot",
+            name="@starslly_bot",
+            description="Buy Telegram Stars",
+        )
+    ]
 
-    message = AsyncMock()
     manager = MagicMock(spec=DialogManager)
     manager.dialog_data = {}
-    manager.middleware_data = {"api_client": api_client}
 
-    await on_prompt_entered(
-        message=message,
-        _widget=MagicMock(),
-        dialog_manager=manager,
-        text="Hello DeepSeek",
-    )
+    result = await get_scenarios_list(dialog_manager=manager, api_client=api_client)
 
-    message.delete.assert_awaited_once()
-    api_client.ask_ai.assert_awaited_once()
-    assert manager.dialog_data["conversation_id"] == "conv-abc"
-    assert manager.dialog_data["last_prompt"] == "Hello DeepSeek"
-    assert manager.dialog_data["last_response"] == "DeepSeek response"
+    assert result["has_scenarios"] is True
+    assert len(result["scenarios"]) == 1
+    assert result["scenarios"][0]["id"] == "starslly_bot"
 
 
 @pytest.mark.asyncio
-async def test_on_toggle_search_and_reset() -> None:
+async def test_get_payment_result() -> None:
     api_client = AsyncMock()
-    callback = AsyncMock()
-    button = MagicMock()
-    manager = MagicMock(spec=DialogManager)
-    manager.dialog_data = {
-        "conversation_id": "conv-xyz",
-        "search_enabled": False,
-        "last_prompt": "Hello",
-    }
-    manager.middleware_data = {"api_client": api_client}
-
-    # Test toggle search
-    await on_toggle_search(callback=callback, _button=button, dialog_manager=manager)
-    assert manager.dialog_data["search_enabled"] is True
-    callback.answer.assert_awaited()
-
-    # Test reset conversation
-    await on_reset_conversation(
-        callback=callback, _button=button, dialog_manager=manager
+    pay_id = uuid4()
+    acc_id = uuid4()
+    now = datetime.now(UTC)
+    api_client.get_payment.return_value = PaymentRead(
+        id=pay_id,
+        client_user_id="user_admin",
+        account_id=acc_id,
+        scenario_id="starslly_bot",
+        amount=Decimal("495.00"),
+        currency="RUB",
+        status="pending",
+        payment_link="https://t.me/$invoice_abc",
+        expires_at=now,
+        meta={"calculated_stars": 300},
+        created_at=now,
+        updated_at=now,
     )
-    api_client.reset_ai_conversation.assert_awaited_with("conv-xyz")
-    assert "last_prompt" not in manager.dialog_data
-    assert manager.dialog_data["conversation_id"] != "conv-xyz"
+
+    manager = MagicMock(spec=DialogManager)
+    manager.dialog_data = {"last_payment_id": str(pay_id)}
+
+    result = await get_payment_result(dialog_manager=manager, api_client=api_client)
+
+    assert result["id"] == str(pay_id)
+    assert result["scenario_id"] == "starslly_bot"
+    assert "495.00 RUB" in result["amount"]
+    assert result["has_link"] is True
+    assert result["payment_link"] == "https://t.me/$invoice_abc"
+    assert "300 ⭐️" in result["meta_info"]

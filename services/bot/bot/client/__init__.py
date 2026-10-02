@@ -3,18 +3,26 @@
 from bot.client.api import ApiClient, ApiClientError
 from bot.client.schemas import (
     HealthCheckResponse,
-    ItemCreate,
-    ItemRead,
     PaginatedResponse,
+    PaymentCreate,
+    PaymentRead,
     ReadinessResponse,
+    ScenarioRead,
+    TelegramAccountCheckResponse,
+    TelegramAccountCreate,
+    TelegramAccountRead,
 )
 
 __all__ = [
     "ApiClient",
     "ApiClientError",
     "HealthCheckResponse",
-    "ItemCreate",
-    "ItemRead",
     "PaginatedResponse",
+    "PaymentCreate",
+    "PaymentRead",
     "ReadinessResponse",
+    "ScenarioRead",
+    "TelegramAccountCheckResponse",
+    "TelegramAccountCreate",
+    "TelegramAccountRead",
 ]

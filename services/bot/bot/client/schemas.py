@@ -1,4 +1,10 @@
+"""
+Pydantic DTO schemas for communicating with backend API.
+"""
+
 from datetime import datetime
+from decimal import Decimal
+from typing import Any
 from uuid import UUID
 
 from pydantic import BaseModel, Field
@@ -23,27 +29,8 @@ class ReadinessResponse(BaseModel):
     timestamp: datetime
 
 
-class ItemRead(BaseModel):
-    """Representation of an Item fetched from the FastAPI backend."""
-
-    id: UUID
-    title: str
-    description: str | None = None
-    is_active: bool = True
-    created_at: datetime
-    updated_at: datetime
-
-
-class ItemCreate(BaseModel):
-    """Payload to create a new Item via the FastAPI backend."""
-
-    title: str = Field(min_length=1, max_length=255)
-    description: str | None = Field(default=None, max_length=1000)
-    is_active: bool = True
-
-
 class PaginatedResponse[T](BaseModel):
-    """Generic envelope matching the backend's RFC-compliant pagination format."""
+    """Generic envelope matching the backend's pagination format."""
 
     items: list[T]
     total: int
@@ -52,37 +39,88 @@ class PaginatedResponse[T](BaseModel):
     pages: int
 
 
-class AICitation(BaseModel):
-    """Citation or web source reference returned by the AI provider."""
+class TelegramAccountRead(BaseModel):
+    """Telegram account details from backend."""
 
+    id: UUID
     title: str
-    url: str
-    snippet: str | None = None
+    phone: str | None = None
+    proxy_url: str | None = None
+    status: str
+    device_model: str
+    system_version: str
+    app_version: str
+    telegram_user_id: int | None = None
+    first_name: str | None = None
+    last_name: str | None = None
+    username: str | None = None
+    is_premium: bool | None = None
+    flood_wait_until: datetime | None = None
+    last_checked_at: datetime | None = None
+    last_error: str | None = None
+    created_at: datetime
+    updated_at: datetime
 
 
-class AIChatRequest(BaseModel):
-    """Request payload to query the backend AI chat endpoint."""
+class TelegramAccountCreate(BaseModel):
+    """Payload to add a new session."""
 
-    prompt: str = Field(min_length=1, max_length=10000)
-    conversation_id: str | None = None
-    model: str = "deepseek-v3"
-    search_enabled: bool = False
-    file_ids: list[str] | None = None
-
-
-class AIChatResponse(BaseModel):
-    """Response payload returned by the backend AI chat endpoint."""
-
-    conversation_id: str
-    response: str
-    model: str
-    search_enabled: bool = False
-    file_ids: list[str] = Field(default_factory=list)
-    citations: list[AICitation] = Field(default_factory=list)
+    title: str = Field(min_length=1, max_length=128)
+    session_string: str = Field(min_length=10)
+    phone: str | None = None
+    proxy_url: str | None = None
+    verify_on_create: bool = True
 
 
-class AIResetResponse(BaseModel):
-    """Response payload returned after resetting an AI conversation context."""
+class TelegramAccountCheckResponse(BaseModel):
+    """Result of MTProto session verification check."""
 
-    conversation_id: str
-    reset: bool
+    account_id: UUID
+    status: str
+    is_authorized: bool
+    telegram_user_id: int | None = None
+    first_name: str | None = None
+    last_name: str | None = None
+    username: str | None = None
+    phone: str | None = None
+    is_premium: bool | None = None
+    flood_wait_seconds: int | None = None
+    error: str | None = None
+    checked_at: datetime
+
+
+class ScenarioRead(BaseModel):
+    """Information on registered bot payment scenario."""
+
+    scenario_id: str
+    name: str
+    description: str
+
+
+class PaymentRead(BaseModel):
+    """Payment transaction details."""
+
+    id: UUID
+    client_user_id: str
+    account_id: UUID
+    scenario_id: str
+    amount: Decimal
+    currency: str
+    status: str
+    payment_link: str | None = None
+    expires_at: datetime
+    paid_at: datetime | None = None
+    cancelled_at: datetime | None = None
+    meta: dict[str, Any] = {}
+    created_at: datetime
+    updated_at: datetime
+
+
+class PaymentCreate(BaseModel):
+    """Payload to initiate a test payment."""
+
+    client_user_id: str
+    scenario_id: str = "starslly_bot"
+    amount: Decimal
+    currency: str = "RUB"
+    meta: dict[str, Any] = {}

@@ -1,3 +1,4 @@
+from decimal import Decimal
 from typing import Any
 from uuid import UUID
 
@@ -5,14 +6,15 @@ import httpx
 import structlog
 
 from bot.client.schemas import (
-    AIChatRequest,
-    AIChatResponse,
-    AIResetResponse,
     HealthCheckResponse,
-    ItemCreate,
-    ItemRead,
     PaginatedResponse,
+    PaymentCreate,
+    PaymentRead,
     ReadinessResponse,
+    ScenarioRead,
+    TelegramAccountCheckResponse,
+    TelegramAccountCreate,
+    TelegramAccountRead,
 )
 
 logger = structlog.stdlib.get_logger(__name__)
@@ -33,7 +35,7 @@ class ApiClient:
     validation, background task scheduling, and persistence.
     """
 
-    def __init__(self, base_url: str, timeout: float = 10.0) -> None:
+    def __init__(self, base_url: str, timeout: float = 30.0) -> None:
         self.base_url = base_url.rstrip("/")
         self._client: httpx.AsyncClient | None = None
         self._timeout = timeout
@@ -68,76 +70,116 @@ class ApiClient:
         response.raise_for_status()
         return ReadinessResponse.model_validate(response.json())
 
-    async def list_items(
-        self, page: int = 1, size: int = 10
-    ) -> PaginatedResponse[ItemRead]:
-        """Fetch a paginated list of items from the backend."""
+    # =========================================================================
+    # Telegram Accounts API
+    # =========================================================================
+    async def list_accounts(
+        self, page: int = 1, size: int = 50
+    ) -> PaginatedResponse[TelegramAccountRead]:
+        """Fetch a paginated list of telegram accounts."""
         client = await self.get_client()
         response = await client.get(
-            "/api/v1/items/", params={"page": page, "size": size}
+            "/api/v1/accounts/", params={"page": page, "size": size}
         )
         response.raise_for_status()
-        return PaginatedResponse[ItemRead].model_validate(response.json())
+        return PaginatedResponse[TelegramAccountRead].model_validate(response.json())
 
-    async def get_item(self, item_id: str | UUID) -> ItemRead | None:
-        """Retrieve a specific item by its UUID."""
+    async def get_account(self, account_id: str | UUID) -> TelegramAccountRead | None:
+        """Retrieve a specific telegram account by UUID."""
         client = await self.get_client()
-        response = await client.get(f"/api/v1/items/{item_id}")
+        response = await client.get(f"/api/v1/accounts/{account_id}")
         if response.status_code == 404:
             return None
         response.raise_for_status()
-        return ItemRead.model_validate(response.json())
+        return TelegramAccountRead.model_validate(response.json())
 
-    async def create_item(self, title: str, description: str | None = None) -> ItemRead:
-        """Create a new item via the backend."""
-        client = await self.get_client()
-        payload = ItemCreate(title=title, description=description).model_dump(
-            exclude_none=True
-        )
-        response = await client.post("/api/v1/items/", json=payload)
-        response.raise_for_status()
-        return ItemRead.model_validate(response.json())
-
-    async def analyze_item(self, item_id: str | UUID) -> dict[str, Any]:
-        """Trigger background analysis of an item via Taskiq."""
-        client = await self.get_client()
-        response = await client.post(f"/api/v1/items/{item_id}/analyze")
-        response.raise_for_status()
-        result: dict[str, Any] = response.json()
-        return result
-
-    async def ask_ai(
+    async def create_account(
         self,
-        prompt: str,
-        conversation_id: str | None = None,
-        model: str = "deepseek-v3",
-        search_enabled: bool = False,
-        file_ids: list[str] | None = None,
-    ) -> AIChatResponse:
-        """Send a prompt to the FastAPI AI chat endpoint."""
+        title: str,
+        session_string: str,
+        phone: str | None = None,
+        proxy_url: str | None = None,
+        verify_on_create: bool = True,
+    ) -> TelegramAccountRead:
+        """Register and optionally verify a new Telegram MTProto session."""
         client = await self.get_client()
-        payload = AIChatRequest(
-            prompt=prompt,
-            conversation_id=conversation_id,
-            model=model,
-            search_enabled=search_enabled,
-            file_ids=file_ids,
+        payload = TelegramAccountCreate(
+            title=title,
+            session_string=session_string,
+            phone=phone,
+            proxy_url=proxy_url,
+            verify_on_create=verify_on_create,
         ).model_dump(exclude_none=True)
-        response = await client.post("/api/v1/ai/chat", json=payload)
-        if response.status_code >= 400:
-            raise ApiClientError(
-                f"AI service error ({response.status_code}): {response.text}",
-                status_code=response.status_code,
-            )
-        return AIChatResponse.model_validate(response.json())
+        response = await client.post("/api/v1/accounts/", json=payload)
+        response.raise_for_status()
+        return TelegramAccountRead.model_validate(response.json())
 
-    async def reset_ai_conversation(self, conversation_id: str) -> AIResetResponse:
-        """Reset stateful AI conversation context on the FastAPI backend."""
+    async def check_account(
+        self, account_id: str | UUID
+    ) -> TelegramAccountCheckResponse:
+        """Trigger an on-demand MTProto health check for an account."""
         client = await self.get_client()
-        response = await client.delete(f"/api/v1/ai/conversations/{conversation_id}")
-        if response.status_code >= 400:
-            raise ApiClientError(
-                f"AI reset error ({response.status_code}): {response.text}",
-                status_code=response.status_code,
-            )
-        return AIResetResponse.model_validate(response.json())
+        response = await client.post(f"/api/v1/accounts/{account_id}/check")
+        response.raise_for_status()
+        return TelegramAccountCheckResponse.model_validate(response.json())
+
+    async def delete_account(self, account_id: str | UUID) -> None:
+        """Delete an account from the pool."""
+        client = await self.get_client()
+        response = await client.delete(f"/api/v1/accounts/{account_id}")
+        response.raise_for_status()
+
+    # =========================================================================
+    # Payments & Scenarios API
+    # =========================================================================
+    async def list_scenarios(self) -> list[ScenarioRead]:
+        """Fetch list of available payment scenarios."""
+        client = await self.get_client()
+        response = await client.get("/api/v1/payments/scenarios")
+        response.raise_for_status()
+        data = response.json()
+        return [ScenarioRead.model_validate(item) for item in data]
+
+    async def create_payment(
+        self,
+        client_user_id: str,
+        amount: Decimal,
+        scenario_id: str = "starslly_bot",
+        currency: str = "RUB",
+        meta: dict[str, Any] | None = None,
+    ) -> PaymentRead:
+        """Create a payment and execute scenario to generate payment link."""
+        client = await self.get_client()
+        payload = PaymentCreate(
+            client_user_id=client_user_id,
+            scenario_id=scenario_id,
+            amount=amount,
+            currency=currency,
+            meta=meta or {},
+        ).model_dump(mode="json")
+        response = await client.post("/api/v1/payments/", json=payload)
+        response.raise_for_status()
+        return PaymentRead.model_validate(response.json())
+
+    async def get_payment(self, payment_id: str | UUID) -> PaymentRead | None:
+        """Get details of a payment by UUID."""
+        client = await self.get_client()
+        response = await client.get(f"/api/v1/payments/{payment_id}")
+        if response.status_code == 404:
+            return None
+        response.raise_for_status()
+        return PaymentRead.model_validate(response.json())
+
+    async def mark_payment_paid(self, payment_id: str | UUID) -> PaymentRead:
+        """Manually mark payment as PAID and release account."""
+        client = await self.get_client()
+        response = await client.post(f"/api/v1/payments/{payment_id}/paid")
+        response.raise_for_status()
+        return PaymentRead.model_validate(response.json())
+
+    async def cancel_payment(self, payment_id: str | UUID) -> PaymentRead:
+        """Cancel payment and release account."""
+        client = await self.get_client()
+        response = await client.post(f"/api/v1/payments/{payment_id}/cancel")
+        response.raise_for_status()
+        return PaymentRead.model_validate(response.json())

@@ -15,6 +15,9 @@ from app.modules.payments.scenarios.registry import (
 from app.modules.payments.scenarios.stars_calculator import (
     calculate_stars_from_amount,
 )
+from app.modules.payments.scenarios.starshoppik_scenario import (
+    StarShoppikBotScenario,
+)
 from app.modules.payments.scenarios.starslly_scenario import (
     StarsllyBotScenario,
 )
@@ -25,6 +28,7 @@ __all__ = [
     "ScenarioContext",
     "ScenarioRegistry",
     "ScenarioResult",
+    "StarShoppikBotScenario",
     "StarsllyBotScenario",
     "calculate_stars_from_amount",
     "scenario_registry",

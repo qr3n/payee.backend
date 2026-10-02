@@ -6,6 +6,9 @@ Allows dynamic lookup and registration of different bot payment strategies.
 from app.modules.payments.exceptions import UnknownScenarioException
 from app.modules.payments.scenarios.base import BasePaymentScenario
 from app.modules.payments.scenarios.mock_scenario import MockBotScenario
+from app.modules.payments.scenarios.starshoppik_scenario import (
+    StarShoppikBotScenario,
+)
 from app.modules.payments.scenarios.starslly_scenario import StarsllyBotScenario
 
 
@@ -17,6 +20,7 @@ class ScenarioRegistry:
         # Pre-register default scenarios
         self.register(MockBotScenario())
         self.register(StarsllyBotScenario())
+        self.register(StarShoppikBotScenario())
 
     def register(self, scenario: BasePaymentScenario) -> None:
         """Register a new payment scenario instance."""

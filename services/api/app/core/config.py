@@ -74,6 +74,10 @@ class Settings(BaseSettings):
     STARS_RECIPIENT_USERNAME: str = "@qr3nnn"
     STARS_CALCULATION_RATE: float = 1.0
 
+    # StarShoppik Bot Payment Scenario Defaults
+    STARSHOPPIK_BOT_USERNAME: str = "StarShoppik_bot"
+    STARSHOPPIK_CHANNEL_USERNAME: str = "Star_Shopikk"
+
     @property
     def redis_uri(self) -> str:
         """Constructs an async Redis connection string."""

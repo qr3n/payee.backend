@@ -3,8 +3,6 @@ Scenario implementation for @starslly_bot (Telegram Stars purchase via QR/СБП
 Executes complete automated MTProto flow to generate invoice payment link.
 """
 
-import asyncio
-
 from telethon import TelegramClient
 
 from app.core.config import settings
@@ -16,6 +14,7 @@ from app.modules.payments.scenarios.base import (
     ScenarioResult,
 )
 from app.modules.payments.scenarios.bot_dialog_helper import (
+    click_button_fast,
     create_telethon_client,
     find_button_by_text,
     find_url_button,
@@ -110,12 +109,10 @@ class StarsllyBotScenario(BasePaymentScenario):
                     channel=channel_username,
                 )
                 await join_channel_safely(client, channel_username)
-                await asyncio.sleep(1.0)
-                await check_sub_btn.click()
+                await click_button_fast(client, check_sub_btn)
                 logger.info("starslly_step_3_sub_verified_clicked")
 
             # Step 4: Open stars menu
-            await asyncio.sleep(0.8)
             logger.info("starslly_step_4_open_stars_menu")
             buy_stars_msg = await client.send_message(bot_username, "⭐️ Купить Звезды")
 
@@ -139,7 +136,7 @@ class StarsllyBotScenario(BasePaymentScenario):
                     status_code=502,
                 )
             logger.info("starslly_step_5_click_gift_friend")
-            await gift_friend_btn.click()
+            await click_button_fast(client, gift_friend_btn)
 
             # Step 6: Wait for username prompt & send recipient username
             await wait_for_bot_message(
@@ -196,7 +193,7 @@ class StarsllyBotScenario(BasePaymentScenario):
                     status_code=502,
                 )
             logger.info("starslly_step_8_click_sbp_button")
-            await sbp_button.click()
+            await click_button_fast(client, sbp_button)
 
             # Step 9: Wait for invoice order message with 'Оплатить' link button
             invoice_msg = await wait_for_bot_message(

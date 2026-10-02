@@ -7,7 +7,7 @@ import asyncio
 from collections.abc import Callable
 from typing import Any
 
-from telethon import TelegramClient, errors, functions
+from telethon import TelegramClient, errors, events, functions, types
 from telethon.sessions import StringSession
 from telethon.tl.custom.messagebutton import MessageButton
 
@@ -101,31 +101,95 @@ def find_url_button(
     return None
 
 
+async def click_button_fast(
+    client: TelegramClient,
+    button: MessageButton,
+    wait_answer_timeout: float = 0.35,
+) -> Any:
+    """
+    Click a button without stalling if the bot backend omits answerCallbackQuery.
+    For inline callback buttons, dispatches GetBotCallbackAnswerRequest and waits
+    at most `wait_answer_timeout` seconds before returning, preventing 15-30s
+    MTProto timeouts.
+    """
+    raw_btn = getattr(button, "button", None)
+    btn_type = getattr(raw_btn, "type", None)
+    if isinstance(btn_type, types.InlineButtonTypeCallback):
+        req = functions.messages.GetBotCallbackAnswerRequest(
+            peer=button._chat,
+            msg_id=button._msg_id,
+            data=btn_type.data,
+        )
+        task = asyncio.create_task(client(req))
+        try:
+            return await asyncio.wait_for(
+                asyncio.shield(task), timeout=wait_answer_timeout
+            )
+        except (TimeoutError, errors.BotResponseTimeoutError):
+            logger.debug(
+                "Bot callback answer timed out (safe to proceed)",
+                btn_text=getattr(button, "text", ""),
+            )
+            return None
+    return await button.click()
+
+
 async def wait_for_bot_message(
     client: TelegramClient,
     peer: Any,
     predicate: Callable[[Any], bool],
     timeout: float = 20.0,
-    poll_interval: float = 1.0,
+    poll_interval: float = 0.15,
     min_id: int | None = None,
 ) -> Any:
     """
-    Poll recent messages from the bot until a message satisfies the predicate.
-    Robust against message edits and intermediate loading notifications.
+    Wait for a bot message matching predicate.
+    Combines immediate message checks, reactive MTProto event listening
+    (events.NewMessage, events.MessageEdited), and short-interval polling.
     """
-    loop_start = asyncio.get_running_loop().time()
-
-    while (asyncio.get_running_loop().time() - loop_start) < timeout:
-        messages = await client.get_messages(peer, limit=6, min_id=min_id or 0)
-        for msg in messages:
-            # Skip messages sent by the user account itself
-            if getattr(msg, "out", False):
-                continue
-            if predicate(msg):
+    # 1. Quick check if matching message is already in recent history
+    try:
+        recent = await client.get_messages(peer, limit=6, min_id=min_id or 0)
+        for msg in recent:
+            if not getattr(msg, "out", False) and predicate(msg):
                 return msg
+    except Exception as e:
+        logger.debug("Initial message check failed", error=str(e))
 
-        await asyncio.sleep(poll_interval)
+    # 2. Event-driven listener
+    loop = asyncio.get_running_loop()
+    result_future: asyncio.Future[Any] = loop.create_future()
 
-    raise TimeoutError(
-        f"Bot did not produce expected message within {timeout}s timeout."
-    )
+    async def on_event(event: Any) -> None:
+        if not result_future.done():
+            msg = getattr(event, "message", None)
+            if msg and not getattr(msg, "out", False) and predicate(msg):
+                result_future.set_result(msg)
+
+    h_new = client.add_event_handler(on_event, events.NewMessage(chats=peer))
+    h_edit = client.add_event_handler(on_event, events.MessageEdited(chats=peer))
+
+    start_time = loop.time()
+    try:
+        while not result_future.done():
+            remaining = timeout - (loop.time() - start_time)
+            if remaining <= 0:
+                raise TimeoutError(
+                    f"Bot did not produce expected message within {timeout}s."
+                )
+
+            step_timeout = min(poll_interval, remaining)
+            try:
+                return await asyncio.wait_for(
+                    asyncio.shield(result_future), timeout=step_timeout
+                )
+            except TimeoutError:
+                msgs = await client.get_messages(peer, limit=6, min_id=min_id or 0)
+                for msg in msgs:
+                    if not getattr(msg, "out", False) and predicate(msg):
+                        return msg
+
+        return result_future.result()
+    finally:
+        client.remove_event_handler(h_new)
+        client.remove_event_handler(h_edit)

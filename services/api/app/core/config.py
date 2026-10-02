@@ -63,11 +63,9 @@ class Settings(BaseSettings):
     REDIS_SOCKET_TIMEOUT: float = 5.0
     REDIS_SOCKET_CONNECT_TIMEOUT: float = 5.0
 
-    # AI & LLM Configuration (DeepSeek Stateful Wrapper)
-    AI_PROVIDER: str = "deepseek"
-    DEEPSEEK_PROXY_URL: str = "http://deepseek:8000/v1"
-    DEEPSEEK_DEFAULT_MODEL: str = "deepseek-v3"
-    DEEPSEEK_TIMEOUT: float = 120.0
+    # Telegram MTProto Client Defaults
+    TELEGRAM_DEFAULT_API_ID: int = 2040
+    TELEGRAM_DEFAULT_API_HASH: str = "b18441a1ff607e10a989891a5462e627"
 
     @property
     def redis_uri(self) -> str:

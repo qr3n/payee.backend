@@ -13,6 +13,7 @@ from sqlmodel.ext.asyncio.session import AsyncSession
 
 from app.api.deps import get_db, get_redis
 from app.main import app
+from app.modules.accounts.models import TelegramAccount  # noqa: F401
 from app.modules.items import Item  # noqa: F401
 
 _test_container = None

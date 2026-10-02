@@ -20,7 +20,9 @@ dependencies = [
     "taskiq-redis>=1.2.3",
     "uuid6>=2025.0.1",
     "prometheus-fastapi-instrumentator>=8.1.0",
-    "python-multipart>=0.0.32",
+    "telethon>=1.38.0",
+    "python-socks[asyncio]>=2.6.0",
+    "cryptg>=0.4.0",
 ]
 
 [dependency-groups]

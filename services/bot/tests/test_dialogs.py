@@ -16,7 +16,11 @@ from bot.client.schemas import (
 )
 from bot.dialogs.accounts import get_account_detail, get_accounts_list
 from bot.dialogs.main_menu import get_system_status
-from bot.dialogs.scenarios import get_payment_result, get_scenarios_list
+from bot.dialogs.scenarios import (
+    format_stage_timings,
+    get_payment_result,
+    get_scenarios_list,
+)
 
 
 @pytest.mark.asyncio
@@ -166,7 +170,22 @@ async def test_get_payment_result() -> None:
         status="pending",
         payment_link="https://t.me/$invoice_abc",
         expires_at=now,
-        meta={"calculated_stars": 300},
+        meta={
+            "calculated_stars": 300,
+            "generation_time_sec": 1.25,
+            "stage_timings": [
+                {
+                    "stage": "account_acquisition",
+                    "description": "Поиск и выделение аккаунта в пуле",
+                    "duration_sec": 0.05,
+                },
+                {
+                    "stage": "connect_session",
+                    "description": "Подключение к сессии из пула",
+                    "duration_sec": 0.20,
+                },
+            ],
+        },
         created_at=now,
         updated_at=now,
     )
@@ -182,3 +201,28 @@ async def test_get_payment_result() -> None:
     assert result["has_link"] is True
     assert result["payment_link"] == "https://t.me/$invoice_abc"
     assert "300 ⭐️" in result["meta_info"]
+    assert (
+        "Поиск и выделение аккаунта в пуле: <code>0.05 сек.</code>"
+        in result["timings_breakdown"]
+    )
+    assert (
+        "Подключение к сессии из пула: <code>0.20 сек.</code>"
+        in result["timings_breakdown"]
+    )
+    assert "Итого:</b> <code>1.25 сек.</code>" in result["timings_breakdown"]
+
+
+def test_format_stage_timings_empty() -> None:
+    assert format_stage_timings(None) == "—"
+    assert "1.50 сек." in format_stage_timings(None, total_sec=1.5)
+
+
+def test_format_stage_timings_populated() -> None:
+    stages = [
+        {"stage": "stage_1", "description": "Этап 1", "duration_sec": 0.12},
+        {"stage": "stage_2", "description": "Этап 2", "duration_sec": 0.88},
+    ]
+    res = format_stage_timings(stages, total_sec=1.00)
+    assert "• Этап 1: <code>0.12 сек.</code>" in res
+    assert "• Этап 2: <code>0.88 сек.</code>" in res
+    assert "⏱ <b>Итого:</b> <code>1.00 сек.</code>" in res

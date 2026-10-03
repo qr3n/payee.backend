@@ -87,11 +87,13 @@ async def create_payment(
     If the same user creates a new payment, cancels their previous payment
     and re-uses the same account.
     """
+    t_start = time.perf_counter()
     now = datetime.now(UTC)
     expires_at = now + timedelta(minutes=PAYMENT_TTL_MINUTES)
     scenario = scenario_registry.get(payment_in.scenario_id)
 
     # 1. Check if user already has an active pending payment
+    account_lookup_start = time.perf_counter()
     existing_payment = await get_active_payment_for_user(
         session, payment_in.client_user_id, now
     )
@@ -117,6 +119,8 @@ async def create_payment(
     if not account:
         account = await acquire_free_account(session, now)
 
+    account_lookup_duration = round(time.perf_counter() - account_lookup_start, 2)
+
     if not account:
         raise NoAccountsAvailableException()
 
@@ -128,14 +132,24 @@ async def create_payment(
         account=account,
         meta=payment_in.meta,
     )
-    t_start = time.perf_counter()
     result = await scenario.create_payment(ctx)
-    duration_sec = round(time.perf_counter() - t_start, 2)
+    total_duration_sec = round(time.perf_counter() - t_start, 2)
+
+    scenario_stages = list(result.meta.get("stage_timings", []))
+    all_stages = [
+        {
+            "stage": "account_acquisition",
+            "description": "Поиск и выделение аккаунта в пуле",
+            "duration_sec": account_lookup_duration,
+        },
+        *scenario_stages,
+    ]
 
     merged_meta = {
         **payment_in.meta,
         **result.meta,
-        "generation_time_sec": duration_sec,
+        "generation_time_sec": total_duration_sec,
+        "stage_timings": all_stages,
     }
 
     # 3. Create new payment record

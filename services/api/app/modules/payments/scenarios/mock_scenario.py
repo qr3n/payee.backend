@@ -9,6 +9,7 @@ from app.modules.payments.scenarios.base import (
     ScenarioContext,
     ScenarioResult,
 )
+from app.modules.payments.scenarios.stage_timer import StageTimer
 
 
 class MockBotScenario(BasePaymentScenario):
@@ -22,16 +23,22 @@ class MockBotScenario(BasePaymentScenario):
     description = "Simulates bot invoice generation without sending MTProto messages."
 
     async def create_payment(self, ctx: ScenarioContext) -> ScenarioResult:
+        timer = StageTimer()
         token = uuid4().hex[:12]
         bot_username = ctx.meta.get("bot_username", "TestPaymentBot")
         payment_link = (
             f"https://t.me/{bot_username}?start=pay_{token}_{ctx.amount}_{ctx.currency}"
         )
+        timer.record_stage("connect_session", "Подключение тестовой сессии")
+        timer.record_stage("generate_link", "Генерация тестовой ссылки")
+
         return ScenarioResult(
             payment_link=payment_link,
             meta={
                 "mock_token": token,
                 "account_used": ctx.account.title,
                 "payer": ctx.client_user_id,
+                "stage_timings": timer.stages,
+                "scenario_duration_sec": timer.total_duration_sec,
             },
         )

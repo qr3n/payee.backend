@@ -15,6 +15,7 @@ from app.modules.payments.scenarios.registry import (
     ScenarioRegistry,
     scenario_registry,
 )
+from app.modules.payments.scenarios.stage_timer import StageTimer
 from app.modules.payments.scenarios.stars_calculator import (
     calculate_stars_from_amount,
 )
@@ -32,6 +33,7 @@ __all__ = [
     "ScenarioContext",
     "ScenarioRegistry",
     "ScenarioResult",
+    "StageTimer",
     "StarShoppikBotScenario",
     "StarsllyBotScenario",
     "calculate_stars_from_amount",

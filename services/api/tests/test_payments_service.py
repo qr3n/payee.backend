@@ -72,6 +72,10 @@ async def test_pool_exhaustion_and_account_acquisition(
     )
     assert p1.account_id in (acc1.id, acc2.id)
     assert p1.status == PaymentStatus.PENDING
+    assert "stage_timings" in p1.meta
+    assert len(p1.meta["stage_timings"]) >= 1
+    assert p1.meta["stage_timings"][0]["stage"] == "account_acquisition"
+    assert "generation_time_sec" in p1.meta
 
     # User 2 creates payment
     p2 = await create_payment(

@@ -34,6 +34,42 @@ def format_payment_status(status: str) -> str:
     return mapping.get(status.lower(), status)
 
 
+def format_stage_timings(
+    stage_timings: list[dict[str, Any]] | None,
+    total_sec: float | str | None = None,
+) -> str:
+    """Format granular stage timings breakdown for Telegram message."""
+    if not stage_timings:
+        if total_sec:
+            total_display = (
+                f"{total_sec:.2f} сек."
+                if isinstance(total_sec, (int, float))
+                else (
+                    str(total_sec) if "сек" in str(total_sec) else f"{total_sec} сек."
+                )
+            )
+            return f"⏱ <b>Всего:</b> <code>{total_display}</code>"
+        return "—"
+
+    lines: list[str] = []
+    for item in stage_timings:
+        desc = item.get("description") or item.get("stage", "Этап")
+        dur = item.get("duration_sec", 0.0)
+        lines.append(f"• {desc}: <code>{dur:.2f} сек.</code>")
+
+    if isinstance(total_sec, (int, float)):
+        total_display = f"{total_sec:.2f} сек."
+    elif total_sec:
+        total_display = (
+            str(total_sec) if "сек" in str(total_sec) else f"{total_sec} сек."
+        )
+    else:
+        total_display = "—"
+
+    lines.append(f"⏱ <b>Итого:</b> <code>{total_display}</code>")
+    return "\n".join(lines)
+
+
 def safe_alert_text(text: str, max_length: int = 180) -> str:
     """Ensure callback answer text stays within Telegram's 200 character limit."""
     if len(text) <= max_length:
@@ -109,6 +145,7 @@ async def get_payment_result(
             "account_id": "—",
             "meta_info": "—",
             "generation_time": "—",
+            "timings_breakdown": "—",
             "action_msg": dialog_manager.dialog_data.pop("payment_action_msg", None),
         }
 
@@ -126,6 +163,7 @@ async def get_payment_result(
                 "account_id": "—",
                 "meta_info": "—",
                 "generation_time": "—",
+                "timings_breakdown": "—",
                 "action_msg": "Платеж не найден в базе данных",
             }
 
@@ -138,6 +176,12 @@ async def get_payment_result(
         if not gen_time:
             gen_time = "—"
 
+        stage_timings = payment.meta.get("stage_timings") or []
+        timings_breakdown = format_stage_timings(
+            stage_timings,
+            total_sec=payment.meta.get("generation_time_sec") or gen_time,
+        )
+
         return {
             "id": str(payment.id),
             "scenario_id": payment.scenario_id,
@@ -149,6 +193,7 @@ async def get_payment_result(
             "account_id": str(payment.account_id),
             "meta_info": meta_info,
             "generation_time": gen_time,
+            "timings_breakdown": timings_breakdown,
             "action_msg": dialog_manager.dialog_data.pop("payment_action_msg", None),
         }
     except Exception as exc:
@@ -163,6 +208,7 @@ async def get_payment_result(
             "account_id": "—",
             "meta_info": "—",
             "generation_time": "—",
+            "timings_breakdown": "—",
             "action_msg": f"❌ Ошибка: {exc}",
         }
 
@@ -396,10 +442,11 @@ payment_result_window = Window(
         "<b>Сценарий:</b> <code>{scenario_id}</code>\n"
         "<b>Сумма:</b> <b>{amount}</b>\n"
         "<b>Статус:</b> {status}\n"
-        "<b>Время генерации:</b> ⏱ <code>{generation_time}</code>\n"
         "<b>Расчет:</b> {meta_info}\n"
         "<b>Истекает:</b> {expires_at}\n"
         "<b>Аккаунт в пуле:</b> <code>{account_id}</code>\n\n"
+        "📊 <b>Детализация времени:</b>\n"
+        "{timings_breakdown}\n\n"
         "🔗 <b>Ссылка на оплату:</b>\n{payment_link}\n"
     ),
     Row(

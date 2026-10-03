@@ -22,6 +22,7 @@ from app.modules.payments.scenarios.bot_dialog_helper import (
     join_channel_safely,
     wait_for_bot_message,
 )
+from app.modules.payments.scenarios.stage_timer import StageTimer
 from app.modules.payments.scenarios.stars_calculator import (
     calculate_stars_from_amount,
 )
@@ -65,6 +66,7 @@ class StarsllyBotScenario(BasePaymentScenario):
             rate=ctx.meta.get("rate"),
         )
 
+        timer = StageTimer()
         client: TelegramClient | None = None
         try:
             logger.info(
@@ -76,6 +78,7 @@ class StarsllyBotScenario(BasePaymentScenario):
                 amount=str(ctx.amount),
             )
             client = await telegram_session_pool.get_connected_client(ctx.account)
+            timer.record_stage("connect_session", "Подключение сессии из пула")
 
             # Step 1: Send /start
             logger.info("starslly_step_1_sending_start", bot=bot_username)
@@ -93,6 +96,7 @@ class StarsllyBotScenario(BasePaymentScenario):
                 timeout=15.0,
                 min_id=start_msg.id,
             )
+            timer.record_stage("send_start", "Команда /start и ответ бота")
 
             # Step 2 & 3: Channel subscription check if prompted
             check_sub_btn = find_button_by_text(first_reply, "Проверить подписку")
@@ -104,6 +108,7 @@ class StarsllyBotScenario(BasePaymentScenario):
                 await join_channel_safely(client, channel_username)
                 await click_button_fast(client, check_sub_btn)
                 logger.info("starslly_step_3_sub_verified_clicked")
+                timer.record_stage("verify_channel", "Подписка на канал и проверка")
 
             # Step 4: Open stars menu
             logger.info("starslly_step_4_open_stars_menu")
@@ -120,6 +125,7 @@ class StarsllyBotScenario(BasePaymentScenario):
                 timeout=15.0,
                 min_id=buy_stars_msg.id,
             )
+            timer.record_stage("open_stars_menu", "Команда «⭐️ Купить Звезды»")
 
             gift_friend_btn = find_button_by_text(stars_prompt, "Купить другу")
             if not gift_friend_btn:
@@ -141,6 +147,7 @@ class StarsllyBotScenario(BasePaymentScenario):
                 ),
                 timeout=15.0,
             )
+            timer.record_stage("select_gift_friend", "Кнопка «Купить другу»")
 
             logger.info("starslly_step_6_sending_recipient", recipient=recipient)
             send_user_msg = await client.send_message(bot_username, recipient)
@@ -156,6 +163,7 @@ class StarsllyBotScenario(BasePaymentScenario):
                 timeout=15.0,
                 min_id=send_user_msg.id,
             )
+            timer.record_stage("send_recipient", f"Ввод получателя ({recipient})")
 
             logger.info(
                 "starslly_step_7_sending_stars_count",
@@ -175,6 +183,7 @@ class StarsllyBotScenario(BasePaymentScenario):
                 timeout=15.0,
                 min_id=send_stars_msg.id,
             )
+            timer.record_stage("send_stars_count", f"Ввод суммы ({stars_count} звёзд)")
 
             sbp_button = find_button_by_text(
                 method_prompt, "QR/СБП"
@@ -195,6 +204,7 @@ class StarsllyBotScenario(BasePaymentScenario):
                 predicate=lambda m: find_url_button(m) is not None,
                 timeout=20.0,
             )
+            timer.record_stage("select_sbp_method", "Выбор способа оплаты QR/СБП")
 
             url_button_info = find_url_button(invoice_msg)
             if not url_button_info:
@@ -209,6 +219,7 @@ class StarsllyBotScenario(BasePaymentScenario):
                 "starslly_step_9_invoice_link_extracted",
                 payment_link=payment_link,
             )
+            timer.record_stage("extract_payment_link", "Получение ссылки на оплату")
 
             return ScenarioResult(
                 payment_link=payment_link,
@@ -217,6 +228,8 @@ class StarsllyBotScenario(BasePaymentScenario):
                     "recipient_username": recipient,
                     "bot_username": bot_username,
                     "payment_method": "QR/СБП",
+                    "stage_timings": timer.stages,
+                    "scenario_duration_sec": timer.total_duration_sec,
                 },
             )
 

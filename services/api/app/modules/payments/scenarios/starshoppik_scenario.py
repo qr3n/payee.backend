@@ -22,6 +22,7 @@ from app.modules.payments.scenarios.bot_dialog_helper import (
     join_channel_safely,
     wait_for_bot_message,
 )
+from app.modules.payments.scenarios.stage_timer import StageTimer
 from app.modules.payments.scenarios.stars_calculator import (
     calculate_stars_from_amount,
 )
@@ -66,6 +67,7 @@ class StarShoppikBotScenario(BasePaymentScenario):
             rate=ctx.meta.get("rate"),
         )
 
+        timer = StageTimer()
         client: TelegramClient | None = None
         try:
             logger.info(
@@ -77,6 +79,7 @@ class StarShoppikBotScenario(BasePaymentScenario):
                 amount=str(ctx.amount),
             )
             client = await telegram_session_pool.get_connected_client(ctx.account)
+            timer.record_stage("connect_session", "Подключение сессии из пула")
 
             # Step 1: Send /start
             logger.info("starshoppik_step_1_sending_start", bot=bot_username)
@@ -94,6 +97,7 @@ class StarShoppikBotScenario(BasePaymentScenario):
                 timeout=15.0,
                 min_id=start_msg.id,
             )
+            timer.record_stage("send_start", "Команда /start и ответ бота")
 
             # Step 1b: Channel subscription if required
             sub_btn = find_button_by_text(first_reply, "подписался")
@@ -114,6 +118,9 @@ class StarShoppikBotScenario(BasePaymentScenario):
                         find_button_by_text(m, "купить stars") is not None
                     ),
                     timeout=15.0,
+                )
+                timer.record_stage(
+                    "verify_channel", "Подписка на канал и подтверждение"
                 )
             else:
                 main_menu = first_reply
@@ -139,6 +146,7 @@ class StarShoppikBotScenario(BasePaymentScenario):
                 ),
                 timeout=15.0,
             )
+            timer.record_stage("open_stars_menu", "Кнопка «Купить Stars»")
 
             gift_friend_btn = find_button_by_text(recipient_prompt, "другу")
             if not gift_friend_btn:
@@ -160,6 +168,7 @@ class StarShoppikBotScenario(BasePaymentScenario):
                 ),
                 timeout=15.0,
             )
+            timer.record_stage("select_gift_friend", "Кнопка «Купить другу»")
 
             custom_count_btn = find_button_by_text(count_prompt, "своё")
             if not custom_count_btn:
@@ -189,6 +198,9 @@ class StarShoppikBotScenario(BasePaymentScenario):
                 timeout=15.0,
                 min_id=send_stars_msg.id,
             )
+            timer.record_stage(
+                "select_custom_amount", f"Ввод суммы ({stars_count} звёзд)"
+            )
 
             logger.info("starshoppik_step_6_sending_recipient", recipient=recipient)
             send_user_msg = await client.send_message(bot_username, recipient)
@@ -204,6 +216,7 @@ class StarShoppikBotScenario(BasePaymentScenario):
                 timeout=15.0,
                 min_id=send_user_msg.id,
             )
+            timer.record_stage("send_recipient", f"Ввод получателя ({recipient})")
 
             sbp_button = find_button_by_text(method_prompt, "сбп")
             if not sbp_button:
@@ -225,6 +238,7 @@ class StarShoppikBotScenario(BasePaymentScenario):
                 predicate=lambda m: find_url_button(m) is not None,
                 timeout=20.0,
             )
+            timer.record_stage("select_sbp_method", "Выбор способа оплаты СБП")
 
             url_button_info = find_url_button(invoice_msg)
             if not url_button_info:
@@ -239,6 +253,7 @@ class StarShoppikBotScenario(BasePaymentScenario):
                 "starshoppik_step_8_invoice_link_extracted",
                 payment_link=payment_link,
             )
+            timer.record_stage("extract_payment_link", "Получение ссылки на оплату")
 
             return ScenarioResult(
                 payment_link=payment_link,
@@ -247,6 +262,8 @@ class StarShoppikBotScenario(BasePaymentScenario):
                     "recipient_username": recipient,
                     "bot_username": bot_username,
                     "payment_method": "СБП",
+                    "stage_timings": timer.stages,
+                    "scenario_duration_sec": timer.total_duration_sec,
                 },
             )
 

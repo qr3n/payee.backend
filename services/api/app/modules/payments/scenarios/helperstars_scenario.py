@@ -22,6 +22,7 @@ from app.modules.payments.scenarios.bot_dialog_helper import (
     join_channel_safely,
     wait_for_bot_message,
 )
+from app.modules.payments.scenarios.stage_timer import StageTimer
 from app.modules.payments.scenarios.stars_calculator import (
     calculate_stars_from_amount,
 )
@@ -67,6 +68,7 @@ class HelperStarsBotScenario(BasePaymentScenario):
             rate=ctx.meta.get("rate"),
         )
 
+        timer = StageTimer()
         client: TelegramClient | None = None
         try:
             logger.info(
@@ -78,6 +80,7 @@ class HelperStarsBotScenario(BasePaymentScenario):
                 amount=str(ctx.amount),
             )
             client = await telegram_session_pool.get_connected_client(ctx.account)
+            timer.record_stage("connect_session", "Подключение сессии из пула")
 
             # Step 1: Send /start
             logger.info("helperstars_step_1_sending_start", bot=bot_username)
@@ -96,6 +99,7 @@ class HelperStarsBotScenario(BasePaymentScenario):
                 timeout=15.0,
                 min_id=start_msg.id,
             )
+            timer.record_stage("send_start", "Команда /start и ответ бота")
 
             # 1a. Handle language selection if prompted
             btn_lang = find_button_by_text(first_reply, "русский")
@@ -112,6 +116,7 @@ class HelperStarsBotScenario(BasePaymentScenario):
                     ),
                     timeout=15.0,
                 )
+                timer.record_stage("select_language", "Выбор языка (Русский)")
             else:
                 next_msg = first_reply
 
@@ -131,6 +136,7 @@ class HelperStarsBotScenario(BasePaymentScenario):
                     ),
                     timeout=15.0,
                 )
+                timer.record_stage("verify_channel", "Подписка на канал")
             else:
                 main_menu = next_msg
 
@@ -155,6 +161,7 @@ class HelperStarsBotScenario(BasePaymentScenario):
                 ),
                 timeout=15.0,
             )
+            timer.record_stage("open_stars_menu", "Кнопка «Купить звёзды» (меню)")
 
             btn_buy_2 = find_button_by_text(submenu_msg, "купить звёзды")
             if not btn_buy_2:
@@ -176,6 +183,9 @@ class HelperStarsBotScenario(BasePaymentScenario):
                 ),
                 timeout=15.0,
             )
+            timer.record_stage(
+                "confirm_stars_category", "Подтверждение «Купить звёзды»"
+            )
 
             logger.info("helperstars_step_4_sending_recipient", recipient=recipient)
             send_user_msg = await client.send_message(bot_username, recipient)
@@ -191,6 +201,7 @@ class HelperStarsBotScenario(BasePaymentScenario):
                 timeout=15.0,
                 min_id=send_user_msg.id,
             )
+            timer.record_stage("send_recipient", f"Ввод получателя ({recipient})")
 
             logger.info(
                 "helperstars_step_5_sending_stars_count",
@@ -209,6 +220,7 @@ class HelperStarsBotScenario(BasePaymentScenario):
                 timeout=15.0,
                 min_id=send_stars_msg.id,
             )
+            timer.record_stage("send_stars_count", f"Ввод суммы ({stars_count} звёзд)")
 
             btn_confirm_pay = find_button_by_text(bill_msg, "оплатить")
             if not btn_confirm_pay:
@@ -230,6 +242,7 @@ class HelperStarsBotScenario(BasePaymentScenario):
                 ),
                 timeout=15.0,
             )
+            timer.record_stage("confirm_bill", "Нажатие «Оплатить» на счете")
 
             btn_sbp = find_button_by_text(methods_msg, "сбп")
             if not btn_sbp:
@@ -248,6 +261,7 @@ class HelperStarsBotScenario(BasePaymentScenario):
                 predicate=lambda m: find_url_button(m) is not None,
                 timeout=20.0,
             )
+            timer.record_stage("select_sbp_method", "Выбор способа оплаты СБП")
 
             url_button_info = find_url_button(invoice_msg)
             if not url_button_info:
@@ -262,6 +276,7 @@ class HelperStarsBotScenario(BasePaymentScenario):
                 "helperstars_step_8_invoice_link_extracted",
                 payment_link=payment_link,
             )
+            timer.record_stage("extract_payment_link", "Получение ссылки на оплату")
 
             return ScenarioResult(
                 payment_link=payment_link,
@@ -270,6 +285,8 @@ class HelperStarsBotScenario(BasePaymentScenario):
                     "recipient_username": recipient,
                     "bot_username": bot_username,
                     "payment_method": "СБП",
+                    "stage_timings": timer.stages,
+                    "scenario_duration_sec": timer.total_duration_sec,
                 },
             )
 

@@ -5,6 +5,7 @@ and scenario dispatch. Follows Unit of Work: NEVER calls session.commit().
 """
 
 import asyncio
+import hashlib
 import json
 import time
 from collections.abc import AsyncGenerator, Sequence
@@ -25,6 +26,8 @@ from app.modules.payments.exceptions import NoAccountsAvailableException
 from app.modules.payments.models import Payment, PaymentStatus
 from app.modules.payments.resolvers import resolve_sbp_link
 from app.modules.payments.scenarios import (
+    AcquiredAccount,
+    GenerationLease,
     ScenarioContext,
     acquire_account_generation_lock,
     acquire_scenario_pending_lock,
@@ -76,7 +79,7 @@ async def get_active_payment_for_user(
 async def acquire_free_account(
     session: AsyncSession,
     scenario_id: str | None = None,
-) -> TelegramAccount | None:
+) -> AcquiredAccount | None:
     """
     Find an active Telegram account not currently locked by an active generation.
     Accounts are locked exclusively for invoice generation (5-15s), not 30m pending.
@@ -115,8 +118,12 @@ async def acquire_free_account(
         candidates = has_slot_busy + is_clean
 
     for account in candidates:
-        if await acquire_account_generation_lock(account.id):
-            return account
+        token = await acquire_account_generation_lock(account.id)
+        if token:
+            return AcquiredAccount(
+                account=account,
+                lease=GenerationLease(account.id, token),
+            )
     return None
 
 
@@ -129,6 +136,7 @@ async def create_payment(
     Once the payment link is obtained, the account lock is released and the account
     is immediately re-warmed in the background for the next customer.
     If the same user creates a new payment, cancels their previous payment.
+    Enforces atomic idempotency via Redis pre-registration locks.
     """
     t_start = time.perf_counter()
     now = datetime.now(UTC)
@@ -136,7 +144,21 @@ async def create_payment(
     scenario = scenario_registry.get(payment_in.scenario_id)
 
     # 0. Check idempotency if idempotency_key is provided
+    idem_acquired = False
+    idem_key: str | None = None
+    payload_hash: str | None = None
+
     if payment_in.idempotency_key:
+        redis = get_redis_client()
+        payload_str = (
+            f"{payment_in.scenario_id}:{payment_in.amount}:{payment_in.currency}"
+        )
+        payload_hash = hashlib.sha256(payload_str.encode()).hexdigest()
+        idem_key = (
+            f"idempotency:{payment_in.client_user_id}:{payment_in.idempotency_key}"
+        )
+
+        # 0a. Check DB first
         stmt = select(Payment).where(
             Payment.client_user_id == payment_in.client_user_id,
             Payment.idempotency_key == payment_in.idempotency_key,
@@ -164,162 +186,246 @@ async def create_payment(
                     status_code=409,
                 )
 
-    # 1. Check if user already has an active pending payment
-    account_lookup_start = time.perf_counter()
-    existing_payment = await get_active_payment_for_user(
-        session, payment_in.client_user_id, now
-    )
-
-    account: TelegramAccount | None = None
-
-    if existing_payment:
-        # Cancel previous payment cleanly and release its reservations
-        await cancel_payment(session, existing_payment)
-        await session.flush()
-
-        # Re-use the same account if it's still active and not currently generating
-        acc_stmt = select(TelegramAccount).where(
-            TelegramAccount.id == existing_payment.account_id,
-            TelegramAccount.status == AccountStatus.ACTIVE,
+        # 0b. Acquire distributed pre-registration key
+        acquired_lock = await redis.set(
+            idem_key,
+            json.dumps({"status": "processing", "payload_hash": payload_hash}),
+            nx=True,
+            ex=120,
         )
-        acc_result = await session.exec(acc_stmt)
-        candidate = acc_result.first()
-        if candidate:
-            candidate_available = True
-            if getattr(
-                scenario, "requires_exclusive_pending_slot", False
-            ) and await is_scenario_pending_locked(scenario.scenario_id, candidate.id):
-                candidate_available = False
-            if candidate_available and await acquire_account_generation_lock(
-                candidate.id
-            ):
-                account = candidate
+        if not acquired_lock:
+            existing_val = await redis.get(idem_key)
+            if existing_val:
+                try:
+                    parsed_val = json.loads(existing_val)
+                    if (
+                        isinstance(parsed_val, dict)
+                        and parsed_val.get("payload_hash")
+                        and parsed_val["payload_hash"] != payload_hash
+                    ):
+                        raise AppException(
+                            message=(
+                                "Idempotency-Key already used with "
+                                "different payment parameters."
+                            ),
+                            code="IDEMPOTENCY_CONFLICT",
+                            status_code=409,
+                        )
+                except (json.JSONDecodeError, TypeError):
+                    pass
 
-    # If no existing active payment or candidate was busy, acquire a free one
-    if not account:
-        account = await acquire_free_account(session, scenario_id=scenario.scenario_id)
+            for _ in range(30):
+                await asyncio.sleep(0.5)
+                existing_idem = (await session.exec(stmt)).first()
+                if existing_idem:
+                    return existing_idem
 
-    account_lookup_duration = round(time.perf_counter() - account_lookup_start, 2)
+            raise AppException(
+                message="A request with this idempotency key is already in progress.",
+                code="CONCURRENT_IDEMPOTENT_REQUEST",
+                status_code=409,
+            )
+        idem_acquired = True
 
-    if not account:
-        raise NoAccountsAvailableException()
-
-    slot_locked = False
     try:
-        # If scenario requires exclusive pending slot, acquire it now
-        if getattr(scenario, "requires_exclusive_pending_slot", False):
-            if not await acquire_scenario_pending_lock(
-                scenario.scenario_id, account.id
-            ):
-                raise NoAccountsAvailableException(
-                    "All account slots for this payment provider are currently busy."
+        # 1. Check if user already has an active pending payment
+        account_lookup_start = time.perf_counter()
+        existing_payment = await get_active_payment_for_user(
+            session, payment_in.client_user_id, now
+        )
+
+        acquired_account: AcquiredAccount | None = None
+
+        if existing_payment:
+            # Cancel previous payment cleanly and release its reservations
+            await cancel_payment(session, existing_payment)
+            await session.flush()
+
+            # Re-use the same account if it's still active and not currently generating
+            acc_stmt = select(TelegramAccount).where(
+                TelegramAccount.id == existing_payment.account_id,
+                TelegramAccount.status == AccountStatus.ACTIVE,
+            )
+            acc_result = await session.exec(acc_stmt)
+            candidate = acc_result.first()
+            if candidate:
+                candidate_available = True
+                if getattr(
+                    scenario, "requires_exclusive_pending_slot", False
+                ) and await is_scenario_pending_locked(
+                    scenario.scenario_id, candidate.id
+                ):
+                    candidate_available = False
+                if candidate_available:
+                    gen_token = await acquire_account_generation_lock(candidate.id)
+                    if gen_token:
+                        acquired_account = AcquiredAccount(
+                            account=candidate,
+                            lease=GenerationLease(candidate.id, gen_token),
+                        )
+
+        # If no existing active payment or candidate was busy, acquire a free one
+        if not acquired_account:
+            acquired_account = await acquire_free_account(
+                session, scenario_id=scenario.scenario_id
+            )
+
+        account_lookup_duration = round(time.perf_counter() - account_lookup_start, 2)
+
+        if not acquired_account:
+            raise NoAccountsAvailableException()
+
+        account = acquired_account.account
+        lease = acquired_account.lease
+        slot_lock_token: str | None = None
+        generation_lock_released = False
+
+        try:
+            # If scenario requires exclusive pending slot, acquire it now
+            if getattr(scenario, "requires_exclusive_pending_slot", False):
+                slot_lock_token = await acquire_scenario_pending_lock(
+                    scenario.scenario_id, account.id
                 )
-            slot_locked = True
+                if not slot_lock_token:
+                    raise NoAccountsAvailableException(
+                        "All account slots for this provider are busy."
+                    )
 
-        # 2. Execute scenario to generate payment link
-        ctx = ScenarioContext(
-            client_user_id=payment_in.client_user_id,
-            amount=payment_in.amount,
-            currency=payment_in.currency,
-            account=account,
-            meta=payment_in.meta,
-        )
-        result = await scenario.create_payment(ctx)
-
-        # Release generation lock immediately after Telegram dialog finishes
-        # (before external SBP resolution)
-        await release_account_generation_lock(account.id)
-
-        # 3. Attempt extraction of direct SBP (NSPK) link if supported gateway link
-        t_resolve_start = time.perf_counter()
-        resolved_link, is_resolved = await resolve_sbp_link(result.payment_link)
-        resolve_duration = round(time.perf_counter() - t_resolve_start, 2)
-
-        total_duration_sec = round(time.perf_counter() - t_start, 2)
-
-        scenario_stages = list(result.meta.get("stage_timings", []))
-        all_stages = [
-            {
-                "stage": "account_acquisition",
-                "description": "Поиск и выделение аккаунта в пуле",
-                "duration_sec": account_lookup_duration,
-            },
-            *scenario_stages,
-        ]
-
-        if is_resolved:
-            all_stages.append(
-                {
-                    "stage": "resolve_sbp_link",
-                    "description": "Извлечение прямой ссылки СБП (НСПК)",
-                    "duration_sec": resolve_duration,
-                }
+            # 2. Execute scenario to generate payment link
+            ctx = ScenarioContext(
+                client_user_id=payment_in.client_user_id,
+                amount=payment_in.amount,
+                currency=payment_in.currency,
+                account=account,
+                meta=payment_in.meta,
             )
-        elif "gate.antilopay.com" in (result.payment_link or "") or "cardlink.link" in (
-            result.payment_link or ""
-        ):
-            all_stages.append(
+            result = await scenario.create_payment(ctx)
+
+            # Release generation lock immediately after Telegram dialog finishes
+            # (before external SBP resolution)
+            await release_account_generation_lock(
+                account.id, owner_token=lease.owner_token
+            )
+            generation_lock_released = True
+
+            # 3. Attempt extraction of direct SBP (NSPK) link if supported gateway link
+            t_resolve_start = time.perf_counter()
+            resolved_link, is_resolved = await resolve_sbp_link(result.payment_link)
+            resolve_duration = round(time.perf_counter() - t_resolve_start, 2)
+
+            total_duration_sec = round(time.perf_counter() - t_start, 2)
+
+            scenario_stages = list(result.meta.get("stage_timings", []))
+            all_stages = [
                 {
-                    "stage": "resolve_sbp_link",
-                    "description": "Попытка извлечения ссылки СБП (оставлен оригинал)",
-                    "duration_sec": resolve_duration,
-                }
+                    "stage": "account_acquisition",
+                    "description": "Поиск и выделение аккаунта в пуле",
+                    "duration_sec": account_lookup_duration,
+                },
+                *scenario_stages,
+            ]
+
+            if is_resolved:
+                all_stages.append(
+                    {
+                        "stage": "resolve_sbp_link",
+                        "description": "Извлечение прямой ссылки СБП (НСПК)",
+                        "duration_sec": resolve_duration,
+                    }
+                )
+            elif "gate.antilopay.com" in (
+                result.payment_link or ""
+            ) or "cardlink.link" in (result.payment_link or ""):
+                all_stages.append(
+                    {
+                        "stage": "resolve_sbp_link",
+                        "description": "Попытка извлечения СБП (оригинал)",
+                        "duration_sec": resolve_duration,
+                    }
+                )
+
+            merged_meta = {
+                **payment_in.meta,
+                **result.meta,
+                "original_payment_link": result.payment_link,
+                "resolved_sbp_link": resolved_link if is_resolved else None,
+                "is_sbp_resolved": is_resolved,
+                "generation_time_sec": total_duration_sec,
+                "stage_timings": all_stages,
+                "slot_lock_token": slot_lock_token,
+            }
+
+            # 4. Create new payment record
+            payment = Payment(
+                client_user_id=payment_in.client_user_id,
+                scenario_id=scenario.scenario_id,
+                amount=payment_in.amount,
+                currency=payment_in.currency,
+                idempotency_key=payment_in.idempotency_key,
+                account_id=account.id,
+                status=PaymentStatus.PENDING,
+                payment_link=resolved_link,
+                expires_at=expires_at,
+                meta=merged_meta,
             )
 
-        merged_meta = {
-            **payment_in.meta,
-            **result.meta,
-            "original_payment_link": result.payment_link,
-            "resolved_sbp_link": resolved_link if is_resolved else None,
-            "is_sbp_resolved": is_resolved,
-            "generation_time_sec": total_duration_sec,
-            "stage_timings": all_stages,
-        }
+            account.updated_at = now
+            session.add(account)
+            session.add(payment)
+            await session.flush()
+            await session.refresh(payment)
+        except Exception:
+            if slot_lock_token:
+                await release_scenario_pending_lock(
+                    scenario.scenario_id,
+                    account.id,
+                    owner_token=slot_lock_token,
+                )
+            raise
+        finally:
+            if not generation_lock_released:
+                await release_account_generation_lock(
+                    account.id, owner_token=lease.owner_token
+                )
 
-        # 4. Create new payment record
-        payment = Payment(
-            client_user_id=payment_in.client_user_id,
-            scenario_id=scenario.scenario_id,
-            amount=payment_in.amount,
-            currency=payment_in.currency,
-            idempotency_key=payment_in.idempotency_key,
-            account_id=account.id,
-            status=PaymentStatus.PENDING,
-            payment_link=resolved_link,
-            expires_at=expires_at,
-            meta=merged_meta,
-        )
+        # 5. Save completed idempotency status in Redis
+        if idem_key and idem_acquired:
+            redis = get_redis_client()
+            await redis.set(
+                idem_key,
+                json.dumps(
+                    {
+                        "status": "completed",
+                        "payment_id": str(payment.id),
+                        "payload_hash": payload_hash,
+                    }
+                ),
+                ex=86400,
+            )
 
-        account.updated_at = now
-        session.add(account)
-        session.add(payment)
-        await session.flush()
-        await session.refresh(payment)
+        # 6. Trigger non-blocking background re-preparation for subsequent use
+        try:
+            from app.modules.payments.tasks import dispatch_single_scenario_warmup
+
+            await dispatch_single_scenario_warmup(
+                account_id=account.id,
+                scenario_id=scenario.scenario_id,
+            )
+        except Exception as exc:
+            logger.warning(
+                "failed_dispatching_post_payment_warmup",
+                account_id=str(account.id),
+                scenario_id=scenario.scenario_id,
+                error=str(exc),
+            )
+
+        return payment
+
     except Exception:
-        if slot_locked:
-            await release_scenario_pending_lock(scenario.scenario_id, account.id)
+        if idem_key and idem_acquired:
+            redis = get_redis_client()
+            await redis.delete(idem_key)
         raise
-    finally:
-        # Release the generation lock immediately once link is obtained or upon error
-        await release_account_generation_lock(account.id)
-
-    # 5. Trigger non-blocking background re-preparation for subsequent use
-    try:
-        from app.modules.payments.tasks import dispatch_single_scenario_warmup
-
-        await dispatch_single_scenario_warmup(
-            account_id=account.id,
-            scenario_id=scenario.scenario_id,
-        )
-    except Exception as exc:
-        logger.warning(
-            "failed_dispatching_post_payment_warmup",
-            account_id=str(account.id),
-            scenario_id=scenario.scenario_id,
-            error=str(exc),
-        )
-
-    return payment
 
 
 async def get_payment(
@@ -360,6 +466,8 @@ PROTECTED_INTERNAL_META_KEYS = {
     "stage_timings",
     "scenario_duration_sec",
     "is_fast_path",
+    "slot_lock_token",
+    "stars_reservation_token",
 }
 
 
@@ -375,45 +483,51 @@ async def mark_payment_status(
     - Terminal states (PAID, CANCELLED, etc.) cannot be undone.
     - Idempotent if target status matches current status.
     - Protected internal meta fields cannot be overwritten by callback.
+    Uses row-level locking to prevent concurrent state transitions.
     """
+    stmt = select(Payment).where(Payment.id == db_payment.id).with_for_update()
+    locked_payment = (await session.exec(stmt)).first() or db_payment
+
     now = datetime.now(UTC)
 
     # 1. State machine transition check
-    if db_payment.status == callback.status:
+    if locked_payment.status == callback.status:
         # Idempotent re-delivery
-        return db_payment
+        return locked_payment
 
-    if db_payment.status == PaymentStatus.PAID:
+    if locked_payment.status == PaymentStatus.PAID:
         raise AppException(
             message="Платёж уже оплачен и не может изменить статус.",
             code="PAYMENT_ALREADY_PAID",
             status_code=409,
         )
 
-    if db_payment.status in (
+    if locked_payment.status in (
         PaymentStatus.CANCELLED,
         PaymentStatus.EXPIRED,
         PaymentStatus.FAILED,
     ):
         raise AppException(
-            message=f"Платёж уже закрыт со статусом {db_payment.status.value}.",
+            message=f"Платёж уже закрыт со статусом {locked_payment.status.value}.",
             code="PAYMENT_ALREADY_CLOSED",
             status_code=409,
         )
 
     # Valid transition from PENDING
-    db_payment.status = callback.status
+    locked_payment.status = callback.status
 
     if callback.status == PaymentStatus.PAID:
-        db_payment.paid_at = now
+        locked_payment.paid_at = now
     elif callback.status == PaymentStatus.CANCELLED:
-        db_payment.cancelled_at = now
+        locked_payment.cancelled_at = now
 
-    # Read original stars_count BEFORE merging any callback metadata
-    stars_count = db_payment.meta.get("stars_count")
+    # Read original tokens BEFORE merging any callback metadata
+    stars_count = locked_payment.meta.get("stars_count")
+    stars_token = locked_payment.meta.get("stars_reservation_token")
+    slot_token = locked_payment.meta.get("slot_lock_token")
 
     if callback.external_transaction_id or callback.meta:
-        updated_meta = dict(db_payment.meta)
+        updated_meta = dict(locked_payment.meta)
         if callback.external_transaction_id:
             updated_meta["external_transaction_id"] = callback.external_transaction_id
         if callback.meta:
@@ -424,7 +538,7 @@ async def mark_payment_status(
                 if k not in PROTECTED_INTERNAL_META_KEYS
             }
             updated_meta.update(safe_meta)
-        db_payment.meta = updated_meta
+        locked_payment.meta = updated_meta
 
     # Release any reserved stars count for the scenario (on terminal states)
     if callback.status in (
@@ -433,21 +547,25 @@ async def mark_payment_status(
         PaymentStatus.EXPIRED,
         PaymentStatus.FAILED,
     ):
-        if stars_count and db_payment.scenario_id:
+        if stars_count and locked_payment.scenario_id and stars_token:
             await release_scenario_stars_reservation(
-                db_payment.scenario_id, int(stars_count)
+                locked_payment.scenario_id,
+                int(stars_count),
+                owner_token=str(stars_token),
             )
 
         # Release any pending scenario slot lock (e.g. starslly_bot)
-        if db_payment.scenario_id and db_payment.account_id:
+        if locked_payment.scenario_id and locked_payment.account_id and slot_token:
             await release_scenario_pending_lock(
-                db_payment.scenario_id, db_payment.account_id
+                locked_payment.scenario_id,
+                locked_payment.account_id,
+                owner_token=str(slot_token),
             )
 
-    session.add(db_payment)
+    session.add(locked_payment)
     await session.flush()
-    await session.refresh(db_payment)
-    return db_payment
+    await session.refresh(locked_payment)
+    return locked_payment
 
 
 async def cancel_payment(
@@ -458,40 +576,50 @@ async def cancel_payment(
     Cancel a pending payment and immediately unlock its assigned account.
     If payment is already PAID, raises 409 conflict.
     If already CANCELLED, EXPIRED, or FAILED, returns idempotently.
+    Uses row-level locking to prevent concurrent state transitions.
     """
-    if db_payment.status == PaymentStatus.PAID:
+    stmt = select(Payment).where(Payment.id == db_payment.id).with_for_update()
+    locked_payment = (await session.exec(stmt)).first() or db_payment
+
+    if locked_payment.status == PaymentStatus.PAID:
         raise AppException(
             message="Нельзя отменить уже оплаченный платёж.",
             code="PAYMENT_ALREADY_PAID",
             status_code=409,
         )
 
-    if db_payment.status in (
+    if locked_payment.status in (
         PaymentStatus.CANCELLED,
         PaymentStatus.EXPIRED,
         PaymentStatus.FAILED,
     ):
-        return db_payment
+        return locked_payment
 
     now = datetime.now(UTC)
-    db_payment.status = PaymentStatus.CANCELLED
-    db_payment.cancelled_at = now
+    locked_payment.status = PaymentStatus.CANCELLED
+    locked_payment.cancelled_at = now
 
-    stars_count = db_payment.meta.get("stars_count")
-    if stars_count and db_payment.scenario_id:
+    stars_count = locked_payment.meta.get("stars_count")
+    stars_token = locked_payment.meta.get("stars_reservation_token")
+    if stars_count and locked_payment.scenario_id and stars_token:
         await release_scenario_stars_reservation(
-            db_payment.scenario_id, int(stars_count)
+            locked_payment.scenario_id,
+            int(stars_count),
+            owner_token=str(stars_token),
         )
 
-    if db_payment.scenario_id and db_payment.account_id:
+    slot_token = locked_payment.meta.get("slot_lock_token")
+    if locked_payment.scenario_id and locked_payment.account_id and slot_token:
         await release_scenario_pending_lock(
-            db_payment.scenario_id, db_payment.account_id
+            locked_payment.scenario_id,
+            locked_payment.account_id,
+            owner_token=str(slot_token),
         )
 
-    session.add(db_payment)
+    session.add(locked_payment)
     await session.flush()
-    await session.refresh(db_payment)
-    return db_payment
+    await session.refresh(locked_payment)
+    return locked_payment
 
 
 async def expire_overdue_payments(session: AsyncSession) -> int:
@@ -500,9 +628,13 @@ async def expire_overdue_payments(session: AsyncSession) -> int:
     Returns the count of expired payments.
     """
     now = datetime.now(UTC)
-    statement = select(Payment).where(
-        Payment.status == PaymentStatus.PENDING,
-        Payment.expires_at <= now,
+    statement = (
+        select(Payment)
+        .where(
+            Payment.status == PaymentStatus.PENDING,
+            Payment.expires_at <= now,
+        )
+        .with_for_update()
     )
     result = await session.exec(statement)
     overdue = result.all()
@@ -510,12 +642,20 @@ async def expire_overdue_payments(session: AsyncSession) -> int:
     for payment in overdue:
         payment.status = PaymentStatus.EXPIRED
         stars_count = payment.meta.get("stars_count")
-        if stars_count and payment.scenario_id:
+        stars_token = payment.meta.get("stars_reservation_token")
+        if stars_count and payment.scenario_id and stars_token:
             await release_scenario_stars_reservation(
-                payment.scenario_id, int(stars_count)
+                payment.scenario_id,
+                int(stars_count),
+                owner_token=str(stars_token),
             )
-        if payment.scenario_id and payment.account_id:
-            await release_scenario_pending_lock(payment.scenario_id, payment.account_id)
+        slot_token = payment.meta.get("slot_lock_token")
+        if payment.scenario_id and payment.account_id and slot_token:
+            await release_scenario_pending_lock(
+                payment.scenario_id,
+                payment.account_id,
+                owner_token=str(slot_token),
+            )
         session.add(payment)
 
     if overdue:
@@ -613,6 +753,11 @@ async def prepare_account_scenarios(
         all_ok = True
 
         for scenario in scenario_registry.list():
+            if getattr(
+                scenario, "requires_exclusive_pending_slot", False
+            ) and await is_scenario_pending_locked(scenario.scenario_id, account.id):
+                results[scenario.scenario_id] = "skipped"
+                continue
             try:
                 logger.info(
                     "preparing_scenario_for_account",
@@ -659,6 +804,16 @@ async def prepare_single_scenario(
     scenario = scenario_registry.get(scenario_id)
     if not scenario:
         return {"status": "skipped", "reason": f"Scenario {scenario_id} not found"}
+
+    if getattr(
+        scenario, "requires_exclusive_pending_slot", False
+    ) and await is_scenario_pending_locked(scenario.scenario_id, account.id):
+        return {
+            "status": "skipped",
+            "account_id": str(account.id),
+            "scenario_id": scenario_id,
+            "reason": "Account pending slot is currently locked",
+        }
 
     lock_token = await acquire_account_generation_lock(account.id, ttl_seconds=60)
     if not lock_token:
@@ -734,17 +889,18 @@ async def refresh_idle_account_scenarios(
                         account_id=str(acc.id),
                         scenario_id=scen.scenario_id,
                     )
-                    await prepare_single_scenario(
+                    res = await prepare_single_scenario(
                         session=session,
                         account_id=acc.id,
                         scenario_id=scen.scenario_id,
                     )
-                    refreshed.append(
-                        {
-                            "account_id": str(acc.id),
-                            "scenario_id": scen.scenario_id,
-                        }
-                    )
+                    if res.get("status") == "completed":
+                        refreshed.append(
+                            {
+                                "account_id": str(acc.id),
+                                "scenario_id": scen.scenario_id,
+                            }
+                        )
             except Exception as exc:
                 logger.warning(
                     "failed_refreshing_scenario",
@@ -764,7 +920,7 @@ async def refresh_idle_account_scenarios(
 async def acquire_N_free_accounts(
     session: AsyncSession,
     n: int,
-) -> list[TelegramAccount]:
+) -> list[AcquiredAccount]:
     """
     Acquire up to N free Telegram accounts (not currently locked by generation).
     Returns LRU accounts first and atomically locks them for generation.
@@ -779,17 +935,23 @@ async def acquire_N_free_accounts(
     result = await session.exec(statement)
     active_accounts = result.all()
 
-    acquired: list[TelegramAccount] = []
+    acquired: list[AcquiredAccount] = []
     for acc in active_accounts:
-        if await acquire_account_generation_lock(acc.id):
-            acquired.append(acc)
+        token = await acquire_account_generation_lock(acc.id)
+        if token:
+            acquired.append(
+                AcquiredAccount(
+                    account=acc,
+                    lease=GenerationLease(acc.id, token),
+                )
+            )
             if len(acquired) == n:
                 break
     return acquired
 
 
 async def _run_race_scenario_task(
-    account: TelegramAccount,
+    acquired: AcquiredAccount,
     scenario_id: str,
     batch_id: UUID,
     race_in: PaymentRaceCreate,
@@ -807,18 +969,22 @@ async def _run_race_scenario_task(
         scenario_registry as _registry,
     )
 
-    slot_locked = False
+    account = acquired.account
+    lease = acquired.lease
+    slot_lock_token: str | None = None
+    generation_lock_released = False
+
     try:
         scenario = _registry.get(scenario_id)
         if not scenario:
             raise ValueError(f"Scenario {scenario_id!r} not found in registry")
 
         if getattr(scenario, "requires_exclusive_pending_slot", False):
-            if not await acquire_scenario_pending_lock(
+            slot_lock_token = await acquire_scenario_pending_lock(
                 scenario.scenario_id, account.id
-            ):
+            )
+            if not slot_lock_token:
                 raise ValueError(f"Account slot for {scenario_id} is already occupied")
-            slot_locked = True
 
         ctx = ScenarioContext(
             client_user_id=race_in.client_user_id,
@@ -832,7 +998,8 @@ async def _run_race_scenario_task(
 
         # Release generation lock immediately after Telegram dialog finishes
         # (before external SBP resolution)
-        await release_account_generation_lock(account.id)
+        await release_account_generation_lock(account.id, owner_token=lease.owner_token)
+        generation_lock_released = True
 
         # SBP resolution
         t_resolve_start = time.perf_counter()
@@ -871,6 +1038,7 @@ async def _run_race_scenario_task(
             "generation_time_sec": generation_time_sec,
             "stage_timings": all_stages,
             "batch_id": str(batch_id),
+            "slot_lock_token": slot_lock_token,
         }
 
         # Persist payment record (own session + own commit — SSE lifecycle exception)
@@ -897,16 +1065,23 @@ async def _run_race_scenario_task(
                 await task_session.rollback()
                 raise
     except asyncio.CancelledError:
-        if slot_locked:
-            await release_scenario_pending_lock(scenario_id, account.id)
+        if slot_lock_token:
+            await release_scenario_pending_lock(
+                scenario_id, account.id, owner_token=slot_lock_token
+            )
         raise
     except Exception:
-        if slot_locked:
-            await release_scenario_pending_lock(scenario_id, account.id)
+        if slot_lock_token:
+            await release_scenario_pending_lock(
+                scenario_id, account.id, owner_token=slot_lock_token
+            )
         raise
     finally:
         # Guarantee generation lock is released once link is obtained or upon error
-        await release_account_generation_lock(account.id)
+        if not generation_lock_released:
+            await release_account_generation_lock(
+                account.id, owner_token=lease.owner_token
+            )
 
     # Trigger warmup for next use (non-blocking, best-effort)
     try:
@@ -974,7 +1149,7 @@ async def start_payment_race(
         raise NoAccountsAvailableException()
 
     # Pair accounts with scenarios (exclusive slots first)
-    pairs: list[tuple[TelegramAccount, str]] = []
+    pairs: list[tuple[AcquiredAccount, str]] = []
     remaining_accounts = list(free_accounts)
 
     exclusive_scenarios = [
@@ -987,7 +1162,7 @@ async def start_payment_race(
     for s in exclusive_scenarios:
         assigned_acc = None
         for acc in remaining_accounts:
-            if not await is_scenario_pending_locked(s.scenario_id, acc.id):
+            if not await is_scenario_pending_locked(s.scenario_id, acc.account.id):
                 assigned_acc = acc
                 break
         if assigned_acc:
@@ -1001,12 +1176,26 @@ async def start_payment_race(
 
     # Release locks on unused accounts
     for unused_acc in remaining_accounts:
-        await release_account_generation_lock(unused_acc.id)
+        await release_account_generation_lock(
+            unused_acc.account.id,
+            owner_token=unused_acc.lease.owner_token,
+        )
+
+    if not pairs:
+        raise NoAccountsAvailableException()
 
     scenario_ids = [sid for _, sid in pairs]
 
     # Initialize Redis event buffer (pushes "started" event)
-    await race_buffer.init_race_buffer(batch_id, scenario_ids)
+    try:
+        await race_buffer.init_race_buffer(batch_id, scenario_ids)
+    except Exception:
+        for acc, _ in pairs:
+            await release_account_generation_lock(
+                acc.account.id,
+                owner_token=acc.lease.owner_token,
+            )
+        raise
 
     # Launch background runner (fire-and-forget)
     task = asyncio.create_task(
@@ -1025,7 +1214,7 @@ async def start_payment_race(
         "payment_race_fired",
         batch_id=str(batch_id),
         scenarios=scenario_ids,
-        accounts=[str(a.id) for a, _ in pairs],
+        accounts=[str(a.account.id) for a, _ in pairs],
     )
 
     return PaymentRaceFireResponse(
@@ -1036,7 +1225,7 @@ async def start_payment_race(
 
 
 async def _race_background_runner(
-    pairs: list[tuple[TelegramAccount, str]],
+    pairs: list[tuple[AcquiredAccount, str]],
     batch_id: UUID,
     race_in: PaymentRaceCreate,
     expires_at: datetime,
@@ -1051,7 +1240,7 @@ async def _race_background_runner(
     tasks = [
         asyncio.create_task(
             _run_race_scenario_task(
-                account=account,
+                acquired=acquired,
                 scenario_id=scenario_id,
                 batch_id=batch_id,
                 race_in=race_in,
@@ -1059,12 +1248,52 @@ async def _race_background_runner(
                 race_start=race_start,
             )
         )
-        for account, scenario_id in pairs
+        for acquired, scenario_id in pairs
     ]
 
     succeeded = 0
     failed = 0
     timed_out = False
+    cancelled = False
+
+    async def _cleanup() -> None:
+        # Cancel all pending tasks and wait for them to finish cleanly
+        pending = [t for t in tasks if not t.done()]
+        for t in pending:
+            t.cancel()
+        if pending:
+            await asyncio.gather(*pending, return_exceptions=True)
+
+        for acquired, _ in pairs:
+            await release_account_generation_lock(
+                acquired.account.id,
+                owner_token=acquired.lease.owner_token,
+            )
+
+        total_duration = round(time.perf_counter() - race_start, 2)
+        cur_task = asyncio.current_task()
+        is_cancelling = (cur_task.cancelling() > 0) if cur_task is not None else False
+        if cancelled or is_cancelling:
+            terminal_status = "cancelled"
+        elif timed_out:
+            terminal_status = "timeout"
+        else:
+            terminal_status = "done"
+        try:
+            await race_buffer.finish_race(
+                batch_id,
+                status=terminal_status,
+                total=len(pairs),
+                succeeded=succeeded,
+                failed=failed,
+                duration_sec=total_duration,
+            )
+        except Exception as exc:
+            logger.error(
+                "race_finish_race_failed",
+                batch_id=str(batch_id),
+                error=str(exc),
+            )
 
     try:
         async with asyncio.timeout(race_in.timeout_sec):
@@ -1074,6 +1303,7 @@ async def _race_background_runner(
                     succeeded += 1
                     await race_buffer.push_race_event(batch_id, sse_event)
                 except asyncio.CancelledError:
+                    cancelled = True
                     raise
                 except Exception as exc:
                     failed += 1
@@ -1105,6 +1335,9 @@ async def _race_background_runner(
         )
         timeout_event = f"event: error\ndata: {timeout_payload}\n\n"
         await race_buffer.push_race_event(batch_id, timeout_event)
+    except asyncio.CancelledError:
+        cancelled = True
+        raise
     except Exception as exc:
         logger.error(
             "race_background_runner_error",
@@ -1112,25 +1345,7 @@ async def _race_background_runner(
             error=str(exc),
         )
     finally:
-        # Cancel all pending tasks and wait for them to finish cleanly
-        pending = [t for t in tasks if not t.done()]
-        for t in pending:
-            t.cancel()
-        if pending:
-            await asyncio.gather(*pending, return_exceptions=True)
-
-        for account, _ in pairs:
-            await release_account_generation_lock(account.id)
-
-    total_duration = round(time.perf_counter() - race_start, 2)
-    await race_buffer.finish_race(
-        batch_id,
-        status="timeout" if timed_out else "done",
-        total=len(pairs),
-        succeeded=succeeded,
-        failed=failed,
-        duration_sec=total_duration,
-    )
+        await asyncio.shield(_cleanup())
 
 
 async def race_stream_generator(

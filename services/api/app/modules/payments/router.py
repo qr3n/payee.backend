@@ -24,7 +24,11 @@ from app.modules.payments.schemas import (
 )
 from app.shared.pagination import PageParams, PaginatedResponse
 
-router = APIRouter(prefix="/payments", tags=["Payments"])
+router = APIRouter(
+    prefix="/payments",
+    tags=["Payments"],
+    dependencies=[Depends(verify_admin_key)],
+)
 
 
 @router.post(
@@ -104,7 +108,6 @@ async def stream_payment_race(batch_id: UUID) -> StreamingResponse:
 async def list_payments(
     params: PageParams = Depends(),
     db: AsyncSession = Depends(get_db),
-    _: None = Depends(verify_admin_key),
 ) -> PaginatedResponse[PaymentRead]:
     """Retrieve paginated payments."""
     payments, total = await payment_service.list_payments_paginated(
@@ -164,7 +167,6 @@ async def mark_payment_paid(
     payment_id: UUID,
     callback: PaymentCallback | None = None,
     db: AsyncSession = Depends(get_db),
-    _: None = Depends(verify_admin_key),
 ) -> PaymentRead:
     """Mark payment as PAID and reactively unlock account."""
     payment = await payment_service.get_payment(session=db, payment_id=payment_id)
@@ -211,7 +213,6 @@ async def handle_payment_callback(
     payment_id: UUID,
     callback: PaymentCallback,
     db: AsyncSession = Depends(get_db),
-    _: None = Depends(verify_admin_key),
 ) -> PaymentRead:
     """Update payment status via external webhook."""
     payment = await payment_service.get_payment(session=db, payment_id=payment_id)
@@ -235,7 +236,6 @@ async def handle_payment_callback(
 )
 async def release_all_accounts_endpoint(
     db: AsyncSession = Depends(get_db),
-    _: None = Depends(verify_admin_key),
 ) -> ReleaseAccountsResponse:
     """Immediately unlock all accounts by cancelling active pending payments."""
     cancelled, released = await payment_service.release_all_locked_accounts(session=db)

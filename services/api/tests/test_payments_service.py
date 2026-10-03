@@ -2,6 +2,8 @@
 Unit and integration tests for Payments service and pool management logic.
 """
 
+import asyncio
+import time
 from datetime import UTC, datetime, timedelta
 from decimal import Decimal
 from unittest.mock import AsyncMock, patch
@@ -9,6 +11,8 @@ from unittest.mock import AsyncMock, patch
 import pytest
 from sqlmodel.ext.asyncio.session import AsyncSession
 
+from app.core.exceptions import AppException
+from app.core.redis import get_redis_client
 from app.modules.accounts.models import AccountStatus, TelegramAccount
 from app.modules.payments.exceptions import (
     NoAccountsAvailableException,
@@ -25,7 +29,12 @@ from app.modules.payments.scenarios import (
     release_account_generation_lock,
     scenario_registry,
 )
-from app.modules.payments.schemas import PaymentCallback, PaymentCreate
+from app.modules.payments.scenarios.state import AcquiredAccount
+from app.modules.payments.schemas import (
+    PaymentCallback,
+    PaymentCreate,
+    PaymentRaceCreate,
+)
 from app.modules.payments.service import (
     cancel_payment,
     create_payment,
@@ -87,8 +96,10 @@ async def test_pool_exhaustion_and_account_acquisition(
     assert not await is_account_generation_locked(p1.account_id)
 
     # When all accounts are generation-locked by concurrent tasks:
-    await acquire_account_generation_lock(acc1.id)
-    await acquire_account_generation_lock(acc2.id)
+    tok1 = await acquire_account_generation_lock(acc1.id)
+    tok2 = await acquire_account_generation_lock(acc2.id)
+    assert tok1 is not None
+    assert tok2 is not None
 
     # Next user tries to create payment -> Pool is full!
     with pytest.raises(NoAccountsAvailableException):
@@ -102,7 +113,7 @@ async def test_pool_exhaustion_and_account_acquisition(
         )
 
     # Releasing generation lock allows acquisition again
-    await release_account_generation_lock(acc1.id)
+    await release_account_generation_lock(acc1.id, owner_token=tok1)
     p2 = await create_payment(
         db_session,
         PaymentCreate(
@@ -112,7 +123,7 @@ async def test_pool_exhaustion_and_account_acquisition(
         ),
     )
     assert p2.account_id == acc1.id
-    await release_account_generation_lock(acc2.id)
+    await release_account_generation_lock(acc2.id, owner_token=tok2)
 
 
 @pytest.mark.asyncio
@@ -517,3 +528,145 @@ async def test_allocate_unique_stars_for_scenario() -> None:
 
     # Cleanup
     await release_all_scenario_stars_reservations()
+
+
+@pytest.mark.asyncio
+async def test_generation_lock_owner_token_safety(
+    db_session: AsyncSession,
+) -> None:
+    """Test that a request cannot release a lock owned by another token."""
+    from app.modules.payments.scenarios.state import (
+        acquire_account_generation_lock,
+        is_account_generation_locked,
+        release_account_generation_lock,
+    )
+
+    acc = await _create_test_account(db_session, "Owner Token Test")
+
+    # A acquires lock
+    token_a = await acquire_account_generation_lock(acc.id)
+    assert token_a is not None
+
+    # Suppose A's lock expired or was overwritten with token B
+    redis = get_redis_client()
+    token_b = "foreign_owner_token"
+    await redis.set(f"lock:account_generation:{acc.id}", token_b)
+
+    # A tries to release with old token A -> must NOT delete B's lock!
+    released = await release_account_generation_lock(acc.id, owner_token=token_a)
+    assert not released
+    assert await is_account_generation_locked(acc.id)
+
+    # Releasing with valid token B succeeds
+    released_b = await release_account_generation_lock(acc.id, owner_token=token_b)
+    assert released_b
+    assert not await is_account_generation_locked(acc.id)
+
+
+@pytest.mark.asyncio
+async def test_concurrent_idempotency_pre_registration(
+    db_session: AsyncSession,
+) -> None:
+    """
+    Test that concurrent requests with same idempotency key return the
+    same payment.
+    """
+    await _create_test_account(db_session, "Idem Account")
+
+    req = PaymentCreate(
+        client_user_id="idem_user_1",
+        scenario_id="mock_bot",
+        amount=Decimal("150.00"),
+        idempotency_key="key_concurrent_123",
+    )
+
+    # Run two concurrent creates
+    p1, p2 = await asyncio.gather(
+        create_payment(db_session, req),
+        create_payment(db_session, req),
+    )
+
+    assert p1.id == p2.id
+    assert p1.status == PaymentStatus.PENDING
+
+
+@pytest.mark.asyncio
+async def test_concurrent_status_transitions_paid_blocks_cancel(
+    db_session: AsyncSession,
+) -> None:
+    """Test that once a payment is marked PAID, cancelling it raises 409 conflict."""
+    await _create_test_account(db_session, "Conflict Acc")
+    payment = await create_payment(
+        db_session,
+        PaymentCreate(
+            client_user_id="user_conflict",
+            scenario_id="mock_bot",
+            amount=Decimal("200.00"),
+        ),
+    )
+
+    # Mark as PAID
+    await mark_payment_status(
+        db_session,
+        payment,
+        PaymentCallback(status=PaymentStatus.PAID),
+    )
+
+    # Attempt to cancel must fail with 409
+    with pytest.raises(AppException) as exc_info:
+        await cancel_payment(db_session, payment)
+    assert exc_info.value.status_code == 409
+    assert exc_info.value.code == "PAYMENT_ALREADY_PAID"
+
+
+@pytest.mark.asyncio
+async def test_race_cancellation_saves_terminal_status() -> None:
+    """
+    Test that cancelling the race background runner finishes race with
+    status 'cancelled'.
+    """
+    from uuid import uuid4
+
+    from app.modules.payments import race_buffer
+    from app.modules.payments.scenarios.state import GenerationLease
+    from app.modules.payments.service import _race_background_runner
+
+    batch_id = uuid4()
+    await race_buffer.init_race_buffer(batch_id, ["mock_bot"])
+
+    acc = TelegramAccount(
+        id=uuid4(),
+        title="Runner Acc",
+        phone="+1234567890",
+        session_string="mock_session",
+        device_model="PC 64bit",
+        system_version="Windows 11",
+        app_version="5.2.2 x64",
+    )
+    lease = GenerationLease(account_id=acc.id, owner_token="lease_tok")
+    acquired = AcquiredAccount(account=acc, lease=lease)
+
+    race_in = PaymentRaceCreate(
+        client_user_id="user_cancel",
+        amount=Decimal("100.00"),
+        timeout_sec=5.0,
+    )
+
+    runner_task = asyncio.create_task(
+        _race_background_runner(
+            pairs=[(acquired, "mock_bot")],
+            batch_id=batch_id,
+            race_in=race_in,
+            expires_at=datetime.now(UTC) + timedelta(minutes=10),
+            race_start=time.perf_counter(),
+        )
+    )
+
+    # Allow runner task to start execution
+    await asyncio.sleep(0.01)
+    runner_task.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await runner_task
+
+    status = await race_buffer.get_race_status(batch_id)
+    assert status == "cancelled"

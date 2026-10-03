@@ -108,6 +108,28 @@ async def setup_test_redis(
         scenario_registry,
     )
 
+    async def mock_eval(script: str, numkeys: int, *keys_and_args: object) -> int:
+        keys = keys_and_args[:numkeys]
+        args = keys_and_args[numkeys:]
+        if "DEL" in script and keys and args:
+            key, token = str(keys[0]), str(args[0])
+            val = await fake_redis.get(key)
+            val_str = val.decode("utf-8") if isinstance(val, bytes) else str(val)
+            if val is not None and val_str == token:
+                await fake_redis.delete(key)
+                return 1
+            return 0
+        if "EXPIRE" in script and keys and len(args) >= 2:
+            key, token, ttl = str(keys[0]), str(args[0]), int(str(args[1]))
+            val = await fake_redis.get(key)
+            val_str = val.decode("utf-8") if isinstance(val, bytes) else str(val)
+            if val is not None and val_str == token:
+                await fake_redis.expire(key, ttl)
+                return 1
+            return 0
+        return 0
+
+    monkeypatch.setattr(fake_redis, "eval", mock_eval)
     monkeypatch.setattr("app.core.redis.redis_client", fake_redis)
     monkeypatch.setattr("app.core.redis.get_redis_client", lambda: fake_redis)
     monkeypatch.setattr("app.core.db.async_session_maker", test_session_maker)

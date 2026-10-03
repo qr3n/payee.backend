@@ -18,7 +18,10 @@ class PaymentCreate(PaymentBase):
 
     amount: Decimal = Field(
         gt=0,
-        description="Monetary amount (must be positive)",
+        max_digits=14,
+        decimal_places=2,
+        allow_inf_nan=False,
+        description="Monetary amount (must be positive, max 2 decimal places)",
         examples=["500.00"],
     )
     meta: dict[str, Any] = Field(
@@ -95,7 +98,10 @@ class PaymentRaceCreate(BaseModel):
     )
     amount: Decimal = Field(
         gt=0,
-        description="Monetary amount (must be positive)",
+        max_digits=14,
+        decimal_places=2,
+        allow_inf_nan=False,
+        description="Monetary amount (must be positive, max 2 decimal places)",
         examples=["500.00"],
     )
     currency: str = Field(

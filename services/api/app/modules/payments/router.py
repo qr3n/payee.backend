@@ -8,7 +8,7 @@ from fastapi import APIRouter, Depends, status
 from fastapi.responses import StreamingResponse
 from sqlmodel.ext.asyncio.session import AsyncSession
 
-from app.api.deps import get_db
+from app.api.deps import get_db, verify_admin_key
 from app.core.exceptions import NotFoundException
 from app.modules.payments import service as payment_service
 from app.modules.payments.models import PaymentStatus
@@ -99,11 +99,12 @@ async def stream_payment_race(batch_id: UUID) -> StreamingResponse:
     "/",
     response_model=PaginatedResponse[PaymentRead],
     summary="List payments",
-    description="Retrieve paginated list of payment transactions.",
+    description="Retrieve paginated list of payment transactions (admin-only).",
 )
 async def list_payments(
     params: PageParams = Depends(),
     db: AsyncSession = Depends(get_db),
+    _: None = Depends(verify_admin_key),
 ) -> PaginatedResponse[PaymentRead]:
     """Retrieve paginated payments."""
     payments, total = await payment_service.list_payments_paginated(
@@ -153,7 +154,7 @@ async def get_payment(
 @router.post(
     "/{payment_id}/paid",
     response_model=PaymentRead,
-    summary="Mark payment as paid",
+    summary="Mark payment as paid (admin-only)",
     description=(
         "Reactive payment confirmation callback. Immediately frees the "
         "reserved Telegram account back to the pool."
@@ -163,6 +164,7 @@ async def mark_payment_paid(
     payment_id: UUID,
     callback: PaymentCallback | None = None,
     db: AsyncSession = Depends(get_db),
+    _: None = Depends(verify_admin_key),
 ) -> PaymentRead:
     """Mark payment as PAID and reactively unlock account."""
     payment = await payment_service.get_payment(session=db, payment_id=payment_id)
@@ -200,7 +202,7 @@ async def cancel_payment(
 @router.post(
     "/{payment_id}/callback",
     response_model=PaymentRead,
-    summary="Generic payment status callback",
+    summary="Generic payment status callback (admin/provider)",
     description=(
         "Updates payment status via webhook and reactively handles account locking."
     ),
@@ -209,6 +211,7 @@ async def handle_payment_callback(
     payment_id: UUID,
     callback: PaymentCallback,
     db: AsyncSession = Depends(get_db),
+    _: None = Depends(verify_admin_key),
 ) -> PaymentRead:
     """Update payment status via external webhook."""
     payment = await payment_service.get_payment(session=db, payment_id=payment_id)
@@ -224,7 +227,7 @@ async def handle_payment_callback(
 @router.post(
     "/release-all-accounts",
     response_model=ReleaseAccountsResponse,
-    summary="Release all locked accounts",
+    summary="Release all locked accounts (admin-only)",
     description=(
         "Cancels all active pending payments and releases all "
         "reserved Telegram accounts."
@@ -232,6 +235,7 @@ async def handle_payment_callback(
 )
 async def release_all_accounts_endpoint(
     db: AsyncSession = Depends(get_db),
+    _: None = Depends(verify_admin_key),
 ) -> ReleaseAccountsResponse:
     """Immediately unlock all accounts by cancelling active pending payments."""
     cancelled, released = await payment_service.release_all_locked_accounts(session=db)

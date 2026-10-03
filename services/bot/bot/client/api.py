@@ -40,18 +40,27 @@ class ApiClient:
     validation, background task scheduling, and persistence.
     """
 
-    def __init__(self, base_url: str, timeout: float = 90.0) -> None:
+    def __init__(
+        self,
+        base_url: str,
+        timeout: float = 90.0,
+        api_key: str | None = None,
+    ) -> None:
         self.base_url = base_url.rstrip("/")
         self._client: httpx.AsyncClient | None = None
         self._timeout = timeout
+        self._api_key = api_key
 
     async def get_client(self) -> httpx.AsyncClient:
         """Obtain or initialize the underlying httpx AsyncClient."""
         if self._client is None or self._client.is_closed:
+            headers = {"Accept": "application/json", "User-Agent": "TelegramBot/1.0"}
+            if self._api_key:
+                headers["X-API-Key"] = self._api_key
             self._client = httpx.AsyncClient(
                 base_url=self.base_url,
                 timeout=self._timeout,
-                headers={"Accept": "application/json", "User-Agent": "TelegramBot/1.0"},
+                headers=headers,
             )
         return self._client
 
@@ -70,7 +79,10 @@ class ApiClient:
                 data = response.json()
                 if isinstance(data, dict):
                     err = data.get("error", {})
-                    msg = err.get("message") or msg
+                    msg = err.get("message") or data.get("detail") or msg
+            req_id = response.headers.get("x-request-id")
+            if req_id:
+                msg = f"{msg} (request_id: {req_id})"
             raise ApiClientError(msg, status_code=response.status_code)
         return response
 
@@ -78,14 +90,14 @@ class ApiClient:
         """Check basic health status of the backend API."""
         client = await self.get_client()
         response = await client.get("/health")
-        response.raise_for_status()
+        self._handle_response(response)
         return HealthCheckResponse.model_validate(response.json())
 
     async def get_readiness(self) -> ReadinessResponse:
         """Check readiness status of backend dependencies (Postgres, Redis)."""
         client = await self.get_client()
-        response = await client.get("/ready")
-        response.raise_for_status()
+        response = await client.get("/api/v1/ready")
+        self._handle_response(response)
         return ReadinessResponse.model_validate(response.json())
 
     # =========================================================================
@@ -99,7 +111,7 @@ class ApiClient:
         response = await client.get(
             "/api/v1/accounts/", params={"page": page, "size": size}
         )
-        response.raise_for_status()
+        self._handle_response(response)
         return PaginatedResponse[TelegramAccountRead].model_validate(response.json())
 
     async def get_account(self, account_id: str | UUID) -> TelegramAccountRead | None:
@@ -108,7 +120,7 @@ class ApiClient:
         response = await client.get(f"/api/v1/accounts/{account_id}")
         if response.status_code == 404:
             return None
-        response.raise_for_status()
+        self._handle_response(response)
         return TelegramAccountRead.model_validate(response.json())
 
     async def create_account(
@@ -133,7 +145,7 @@ class ApiClient:
             verify_on_create=verify_on_create,
         ).model_dump(exclude_none=True)
         response = await client.post("/api/v1/accounts/", json=payload)
-        response.raise_for_status()
+        self._handle_response(response)
         return TelegramAccountRead.model_validate(response.json())
 
     async def upload_account_session(
@@ -163,7 +175,7 @@ class ApiClient:
             data["proxy_url"] = proxy_url
 
         response = await client.post("/api/v1/accounts/upload", files=files, data=data)
-        response.raise_for_status()
+        self._handle_response(response)
         return TelegramAccountRead.model_validate(response.json())
 
     async def send_phone_code(
@@ -187,7 +199,7 @@ class ApiClient:
             payload["proxy_url"] = proxy_url
 
         response = await client.post("/api/v1/accounts/auth/send-code", json=payload)
-        response.raise_for_status()
+        self._handle_response(response)
         return PhoneCodeResponse.model_validate(response.json())
 
     async def sign_in_phone(
@@ -209,7 +221,7 @@ class ApiClient:
             payload["two_fa_password"] = two_fa_password
 
         response = await client.post("/api/v1/accounts/auth/sign-in", json=payload)
-        response.raise_for_status()
+        self._handle_response(response)
         return PhoneSignInResponse.model_validate(response.json())
 
     async def check_account(
@@ -218,14 +230,14 @@ class ApiClient:
         """Trigger an on-demand MTProto health check for an account."""
         client = await self.get_client()
         response = await client.post(f"/api/v1/accounts/{account_id}/check")
-        response.raise_for_status()
+        self._handle_response(response)
         return TelegramAccountCheckResponse.model_validate(response.json())
 
     async def check_all_accounts(self) -> CheckAllAccountsResponse:
         """Trigger batch health verification across all non-disabled accounts."""
         client = await self.get_client()
         response = await client.post("/api/v1/accounts/check-all")
-        response.raise_for_status()
+        self._handle_response(response)
         return CheckAllAccountsResponse.model_validate(response.json())
 
     async def delete_account(self, account_id: str | UUID) -> None:
@@ -248,7 +260,7 @@ class ApiClient:
         """Fetch list of available payment scenarios."""
         client = await self.get_client()
         response = await client.get("/api/v1/payments/scenarios")
-        response.raise_for_status()
+        self._handle_response(response)
         data = response.json()
         return [ScenarioRead.model_validate(item) for item in data]
 
@@ -270,7 +282,7 @@ class ApiClient:
             meta=meta or {},
         ).model_dump(mode="json")
         response = await client.post("/api/v1/payments/", json=payload)
-        response.raise_for_status()
+        self._handle_response(response)
         return PaymentRead.model_validate(response.json())
 
     async def get_payment(self, payment_id: str | UUID) -> PaymentRead | None:
@@ -279,26 +291,26 @@ class ApiClient:
         response = await client.get(f"/api/v1/payments/{payment_id}")
         if response.status_code == 404:
             return None
-        response.raise_for_status()
+        self._handle_response(response)
         return PaymentRead.model_validate(response.json())
 
     async def mark_payment_paid(self, payment_id: str | UUID) -> PaymentRead:
         """Manually mark payment as PAID and release account."""
         client = await self.get_client()
         response = await client.post(f"/api/v1/payments/{payment_id}/paid")
-        response.raise_for_status()
+        self._handle_response(response)
         return PaymentRead.model_validate(response.json())
 
     async def cancel_payment(self, payment_id: str | UUID) -> PaymentRead:
         """Cancel payment and release account."""
         client = await self.get_client()
         response = await client.post(f"/api/v1/payments/{payment_id}/cancel")
-        response.raise_for_status()
+        self._handle_response(response)
         return PaymentRead.model_validate(response.json())
 
     async def release_all_accounts(self) -> ReleaseAccountsResponse:
         """Cancel all active pending payments and release all locked accounts."""
         client = await self.get_client()
         response = await client.post("/api/v1/payments/release-all-accounts")
-        response.raise_for_status()
+        self._handle_response(response)
         return ReleaseAccountsResponse.model_validate(response.json())

@@ -85,6 +85,7 @@ class Settings(BaseSettings):
     HELPERSTARS_START_PARAM: str = "1287935345"
 
     # Telegram Bot Admin & Notifications
+    ADMIN_API_KEY: SecretStr | None = None
     TELEGRAM_BOT_TOKEN: SecretStr | None = None
     ADMIN_CHAT_IDS: list[int] = []
     ACCOUNT_CHECK_INTERVAL_SECONDS: int = 300

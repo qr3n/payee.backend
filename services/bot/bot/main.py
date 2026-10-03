@@ -13,6 +13,7 @@ from bot.core.config import BotSettings, get_settings
 from bot.core.logging import setup_logging
 from bot.core.storage import create_storage
 from bot.handlers.router import get_root_router
+from bot.middlewares.acl import AdminAclMiddleware
 from bot.middlewares.client import ApiClientMiddleware
 from bot.middlewares.logging import LoggingMiddleware
 from bot.webhook.server import create_webhook_app
@@ -43,6 +44,7 @@ def build_dispatcher(
 
     # Register Middlewares
     dp.update.outer_middleware(LoggingMiddleware())
+    dp.update.outer_middleware(AdminAclMiddleware(settings.ADMIN_CHAT_IDS))
     dp.update.outer_middleware(ApiClientMiddleware(api_client))
 
     # Register Root Router (Commands + Dialogs)
@@ -105,6 +107,7 @@ def main() -> None:
     api_client = ApiClient(
         base_url=settings.API_BASE_URL,
         timeout=settings.API_TIMEOUT,
+        api_key=settings.API_KEY.get_secret_value() if settings.API_KEY else None,
     )
 
     dp, bot = build_dispatcher(settings, api_client)

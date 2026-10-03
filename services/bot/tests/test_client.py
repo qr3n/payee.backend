@@ -56,7 +56,7 @@ async def test_client_get_readiness() -> None:
     now_str = datetime.now(UTC).isoformat()
 
     def handler(request: httpx.Request) -> httpx.Response:
-        assert request.url.path == "/ready"
+        assert request.url.path == "/api/v1/ready"
         return httpx.Response(
             200,
             json={

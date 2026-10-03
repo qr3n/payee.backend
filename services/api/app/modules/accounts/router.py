@@ -7,7 +7,7 @@ from uuid import UUID
 from fastapi import APIRouter, BackgroundTasks, Depends, File, Form, UploadFile, status
 from sqlmodel.ext.asyncio.session import AsyncSession
 
-from app.api.deps import get_db
+from app.api.deps import get_db, verify_admin_key
 from app.core.exceptions import AppException, NotFoundException
 from app.modules.accounts import phone_auth_service
 from app.modules.accounts import service as account_service
@@ -26,7 +26,11 @@ from app.modules.accounts.schemas import (
 from app.modules.payments.tasks import dispatch_account_scenarios_warmup
 from app.shared.pagination import PageParams, PaginatedResponse
 
-router = APIRouter(prefix="/accounts", tags=["Telegram Accounts"])
+router = APIRouter(
+    prefix="/accounts",
+    tags=["Telegram Accounts"],
+    dependencies=[Depends(verify_admin_key)],
+)
 
 
 @router.post(

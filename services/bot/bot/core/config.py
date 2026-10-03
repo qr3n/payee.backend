@@ -72,6 +72,10 @@ class BotSettings(BaseSettings):
         default="http://api:8000",
         description="Base URL of the FastAPI backend service",
     )
+    API_KEY: SecretStr | None = Field(
+        default=None,
+        description="Administrative API key for backend communication",
+    )
     API_TIMEOUT: float = Field(
         default=90.0,
         description="HTTP request timeout in seconds for backend calls",

@@ -123,7 +123,7 @@ class PaymentRead(BaseModel):
 
     id: UUID
     client_user_id: str
-    account_id: UUID
+    account_id: UUID | None = None
     scenario_id: str
     amount: Decimal
     currency: str

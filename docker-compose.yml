@@ -72,6 +72,7 @@ services:
     volumes:
       # Mount local app directory for hot-reloading in development
       - ./services/api/app:/app/app:ro
+      - ./services/api/alembic:/app/alembic:ro
     environment:
       - ENVIRONMENT=development
       - DEBUG=true

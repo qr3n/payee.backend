@@ -156,6 +156,47 @@ async def test_account_crud_lifecycle(db_session: AsyncSession) -> None:
     assert deleted is None
 
 
+@pytest.mark.asyncio
+async def test_delete_account_with_associated_payments(
+    db_session: AsyncSession,
+) -> None:
+    """Test that deleting an account disassociates payments cleanly."""
+    from datetime import UTC, datetime, timedelta
+    from decimal import Decimal
+
+    from app.modules.payments.models import Payment, PaymentStatus
+
+    acc = TelegramAccount(
+        title="Account With Payment",
+        session_string=VALID_SESSION_STRING,
+        device_model="Dev",
+        system_version="Sys",
+        app_version="App",
+        status=AccountStatus.ACTIVE,
+    )
+    db_session.add(acc)
+    await db_session.flush()
+
+    payment = Payment(
+        client_user_id="user_del_test",
+        scenario_id="mock_bot",
+        amount=Decimal("100.00"),
+        account_id=acc.id,
+        status=PaymentStatus.PENDING,
+        expires_at=datetime.now(UTC) + timedelta(minutes=30),
+    )
+    db_session.add(payment)
+    await db_session.flush()
+
+    # Deleting account should succeed and set payment.account_id = None
+    await delete_account(db_session, acc)
+    assert await get_account(db_session, acc.id) is None
+
+    await db_session.refresh(payment)
+    assert payment.account_id is None
+    assert payment.client_user_id == "user_del_test"
+
+
 def _create_test_session_string() -> str:
     from telethon.crypto import AuthKey
     from telethon.sessions import StringSession

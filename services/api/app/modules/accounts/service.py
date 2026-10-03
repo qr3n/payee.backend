@@ -4,13 +4,15 @@ Follows Unit of Work: NEVER calls session.commit(), relies on dependency flush.
 """
 
 from collections.abc import Sequence
+from contextlib import suppress
 from datetime import UTC, datetime
 from uuid import UUID
 
-from sqlmodel import col, func, select
+from sqlmodel import col, func, select, update
 from sqlmodel.ext.asyncio.session import AsyncSession
 
 from app.core.logging import get_logger
+from app.core.redis import get_redis
 from app.modules.accounts.device_profiles import generate_device_profile
 from app.modules.accounts.models import AccountStatus, TelegramAccount
 from app.modules.accounts.notifier import notify_status_change_if_needed
@@ -139,6 +141,22 @@ async def delete_account(
     db_account: TelegramAccount,
 ) -> None:
     """Delete a Telegram account within active transaction."""
+    from app.modules.payments.models import Payment
+
+    await telegram_session_pool.close_account(db_account.id)
+
+    # Disassociate historical payments before deleting account
+    statement = (
+        update(Payment)
+        .where(col(Payment.account_id) == db_account.id)
+        .values(account_id=None)
+    )
+    await session.exec(statement)
+
+    with suppress(Exception):
+        redis = get_redis()
+        await redis.delete(f"account_alert_state:{db_account.id}")
+
     await session.delete(db_account)
     await session.flush()
 

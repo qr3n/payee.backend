@@ -32,6 +32,13 @@ def format_status_badge(status: str) -> str:
     return mapping.get(status.lower(), f"⚪ {status}")
 
 
+def safe_alert_text(text: str, max_length: int = 180) -> str:
+    """Ensure callback answer text stays within Telegram's 200 character limit."""
+    if len(text) <= max_length:
+        return text
+    return text[: max_length - 3] + "..."
+
+
 # ==============================================================================
 # Data Getters
 # ==============================================================================
@@ -200,7 +207,7 @@ async def on_check_account(
         await callback.answer("Проверка выполнена!")
     except Exception as exc:
         dialog_manager.dialog_data["detail_msg"] = f"❌ Ошибка проверки: {exc}"
-        await callback.answer(f"Ошибка: {exc}", show_alert=True)
+        await callback.answer(safe_alert_text(f"Ошибка: {exc}"), show_alert=True)
 
 
 async def on_check_all_accounts(
@@ -245,7 +252,9 @@ async def on_delete_account(
         )
         await dialog_manager.switch_to(AccountsSG.list_accounts)
     except Exception as exc:
-        await callback.answer(f"Ошибка удаления: {exc}", show_alert=True)
+        await callback.answer(
+            safe_alert_text(f"Ошибка удаления: {exc}"), show_alert=True
+        )
 
 
 # ==============================================================================

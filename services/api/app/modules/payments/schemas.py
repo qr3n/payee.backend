@@ -33,7 +33,9 @@ class PaymentRead(SQLModel):
 
     id: UUID = Field(description="Unique payment ID (UUIDv7)")
     client_user_id: str = Field(description="Client/user identifier")
-    account_id: UUID = Field(description="Assigned Telegram account ID")
+    account_id: UUID | None = Field(
+        default=None, description="Assigned Telegram account ID"
+    )
     scenario_id: str = Field(description="Executed payment scenario ID")
     amount: Decimal = Field(description="Payment amount")
     currency: str = Field(description="Payment currency")

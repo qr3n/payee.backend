@@ -8,7 +8,7 @@ from enum import StrEnum
 from typing import Any
 from uuid import UUID
 
-from sqlalchemy import JSON, Column, Numeric, String, Text
+from sqlalchemy import JSON, Column, ForeignKey, Numeric, String, Text
 from sqlmodel import Field, SQLModel
 
 from app.shared.models import BaseUUIDModel
@@ -60,10 +60,13 @@ class Payment(PaymentBase, BaseUUIDModel, table=True):
 
     __tablename__ = "payments"
 
-    account_id: UUID = Field(
-        foreign_key="telegram_accounts.id",
-        index=True,
-        nullable=False,
+    account_id: UUID | None = Field(
+        default=None,
+        sa_column=Column(
+            ForeignKey("telegram_accounts.id", ondelete="SET NULL"),
+            index=True,
+            nullable=True,
+        ),
         description="Telegram account reserved for creating this payment",
     )
     status: PaymentStatus = Field(

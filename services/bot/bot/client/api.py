@@ -1,3 +1,4 @@
+from contextlib import suppress
 from decimal import Decimal
 from typing import Any
 from uuid import UUID
@@ -58,6 +59,19 @@ class ApiClient:
         if self._client is not None and not self._client.is_closed:
             await self._client.aclose()
             self._client = None
+
+    @staticmethod
+    def _handle_response(response: httpx.Response) -> httpx.Response:
+        """Validate response status and extract clean error messages."""
+        if response.is_error:
+            msg = response.text
+            with suppress(Exception):
+                data = response.json()
+                if isinstance(data, dict):
+                    err = data.get("error", {})
+                    msg = err.get("message") or msg
+            raise ApiClientError(msg, status_code=response.status_code)
+        return response
 
     async def get_health(self) -> HealthCheckResponse:
         """Check basic health status of the backend API."""
@@ -217,7 +231,7 @@ class ApiClient:
         """Delete an account from the pool."""
         client = await self.get_client()
         response = await client.delete(f"/api/v1/accounts/{account_id}")
-        response.raise_for_status()
+        self._handle_response(response)
 
     # =========================================================================
     # Payments & Scenarios API

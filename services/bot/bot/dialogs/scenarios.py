@@ -34,6 +34,13 @@ def format_payment_status(status: str) -> str:
     return mapping.get(status.lower(), status)
 
 
+def safe_alert_text(text: str, max_length: int = 180) -> str:
+    """Ensure callback answer text stays within Telegram's 200 character limit."""
+    if len(text) <= max_length:
+        return text
+    return text[: max_length - 3] + "..."
+
+
 # ==============================================================================
 # Data Getters
 # ==============================================================================
@@ -302,7 +309,7 @@ async def on_mark_paid(
         await callback.answer("Платеж оплачен!")
     except Exception as exc:
         dialog_manager.dialog_data["payment_action_msg"] = f"❌ Ошибка: {exc}"
-        await callback.answer(f"Ошибка: {exc}", show_alert=True)
+        await callback.answer(safe_alert_text(f"Ошибка: {exc}"), show_alert=True)
 
 
 async def on_cancel_payment(
@@ -326,7 +333,7 @@ async def on_cancel_payment(
         await callback.answer("Платеж отменен!")
     except Exception as exc:
         dialog_manager.dialog_data["payment_action_msg"] = f"❌ Ошибка: {exc}"
-        await callback.answer(f"Ошибка: {exc}", show_alert=True)
+        await callback.answer(safe_alert_text(f"Ошибка: {exc}"), show_alert=True)
 
 
 # ==============================================================================

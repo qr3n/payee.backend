@@ -8,6 +8,7 @@ from telethon import TelegramClient
 from app.core.config import settings
 from app.core.exceptions import AppException
 from app.core.logging import get_logger
+from app.modules.accounts.models import TelegramAccount
 from app.modules.accounts.session_pool import telegram_session_pool
 from app.modules.payments.scenarios.base import (
     BasePaymentScenario,
@@ -290,3 +291,52 @@ class HelperStarsBotScenario(BasePaymentScenario):
             ) from e
         finally:
             await telegram_session_pool.touch(ctx.account.id)
+
+    async def prepare(
+        self,
+        account: TelegramAccount,
+        client: TelegramClient,
+    ) -> None:
+        """
+        Background warmup for @HelperStars_Robot:
+        1. Join channel if required.
+        2. Send /start to bot.
+        3. If language selection appears, click 'Русский'.
+        """
+        bot_username = settings.HELPERSTARS_BOT_USERNAME
+        channel_username = settings.HELPERSTARS_CHANNEL_USERNAME
+        try:
+            logger.info(
+                "helperstars_prepare_started",
+                account_id=str(account.id),
+                bot=bot_username,
+                channel=channel_username,
+            )
+            await join_channel_safely(client, channel_username)
+
+            start_msg = await client.send_message(bot_username, "/start")
+            first_reply = await wait_for_bot_message(
+                client=client,
+                peer=bot_username,
+                predicate=lambda m: (
+                    find_button_by_text(m, "русский") is not None
+                    or find_button_by_text(m, "купить звёзды") is not None
+                    or "подписаться" in (getattr(m, "text", "") or "").lower()
+                    or "текущий баланс" in (getattr(m, "text", "") or "").lower()
+                ),
+                timeout=15.0,
+                min_id=start_msg.id,
+            )
+
+            btn_lang = find_button_by_text(first_reply, "русский")
+            if btn_lang:
+                logger.info("helperstars_prepare_select_language")
+                await click_button_fast(client, btn_lang)
+
+            logger.info("helperstars_prepare_completed", account_id=str(account.id))
+        except Exception as exc:
+            logger.warning(
+                "helperstars_prepare_failed",
+                account_id=str(account.id),
+                error=str(exc),
+            )

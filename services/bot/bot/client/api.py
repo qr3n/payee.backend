@@ -233,6 +233,13 @@ class ApiClient:
         response = await client.delete(f"/api/v1/accounts/{account_id}")
         self._handle_response(response)
 
+    async def prepare_account(self, account_id: str | UUID) -> dict[str, Any]:
+        """Trigger background preparation/warmup of all scenarios for an account."""
+        client = await self.get_client()
+        response = await client.post(f"/api/v1/accounts/{account_id}/prepare")
+        self._handle_response(response)
+        return response.json()  # type: ignore[no-any-return]
+
     # =========================================================================
     # Payments & Scenarios API
     # =========================================================================

@@ -221,3 +221,49 @@ async def test_starslly_bot_scenario_complete_flow() -> None:
         btn_gift.click.assert_awaited_once()
         btn_sbp.click.assert_awaited_once()
         mock_touch.assert_awaited_once_with(account.id)
+
+
+@pytest.mark.asyncio
+async def test_starslly_scenario_prepare() -> None:
+    """Test StarsllyBotScenario prepare hook."""
+    account = TelegramAccount(
+        title="Prepare Test",
+        phone="+1234567890",
+        session_string=VALID_SESSION_STRING,
+        device_model="PC 64bit",
+        system_version="Windows 11",
+        app_version="5.2.2 x64",
+        status=AccountStatus.ACTIVE,
+    )
+    mock_client = AsyncMock()
+    mock_start = MagicMock()
+    mock_start.id = 50
+    mock_client.send_message = AsyncMock(return_value=mock_start)
+
+    btn_verify = MagicMock()
+    btn_verify.text = "Проверить подписку"
+
+    msg_reply = MagicMock()
+    msg_reply.id = 51
+    msg_reply.out = False
+    msg_reply.text = "Подпишитесь"
+    msg_reply.buttons = [[btn_verify]]
+
+    mock_client.get_messages = AsyncMock(return_value=[msg_reply])
+
+    with (
+        patch(
+            "app.modules.payments.scenarios.starslly_scenario.join_channel_safely",
+            new=AsyncMock(return_value=True),
+        ) as mock_join,
+        patch(
+            "app.modules.payments.scenarios.starslly_scenario.click_button_fast",
+            new=AsyncMock(),
+        ) as mock_click,
+    ):
+        scenario = StarsllyBotScenario()
+        await scenario.prepare(account=account, client=mock_client)
+
+        mock_join.assert_awaited_once()
+        mock_client.send_message.assert_awaited_once()
+        mock_click.assert_awaited_once_with(mock_client, btn_verify)

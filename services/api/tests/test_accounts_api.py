@@ -182,3 +182,30 @@ async def test_check_all_accounts_api(client: AsyncClient) -> None:
         assert data["active"] == 2
         assert data["revoked"] == 1
         assert data["banned"] == 0
+
+
+@pytest.mark.asyncio
+async def test_prepare_account_endpoint(
+    client: AsyncClient,
+) -> None:
+    """Test POST /api/v1/accounts/{id}/prepare endpoint."""
+    with patch(
+        "app.modules.accounts.router.dispatch_account_scenarios_warmup",
+        new=AsyncMock(),
+    ) as mock_dispatch:
+        # Create account first
+        payload = {
+            "title": "Prepare Endpoint Test",
+            "session_string": VALID_SESSION_STRING,
+            "phone": "+79997776655",
+        }
+        create_resp = await client.post("/api/v1/accounts/", json=payload)
+        assert create_resp.status_code == 201
+        account_id = create_resp.json()["id"]
+
+        # Call prepare endpoint
+        resp = await client.post(f"/api/v1/accounts/{account_id}/prepare")
+        assert resp.status_code == 200
+        assert resp.json()["account_id"] == account_id
+        assert "dispatched" in resp.json()["message"]
+        mock_dispatch.assert_called()

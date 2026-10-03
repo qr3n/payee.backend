@@ -4,6 +4,7 @@ Unit and integration tests for Payments service and pool management logic.
 
 from datetime import UTC, datetime, timedelta
 from decimal import Decimal
+from unittest.mock import AsyncMock, patch
 
 import pytest
 from sqlmodel.ext.asyncio.session import AsyncSession
@@ -313,3 +314,21 @@ async def test_list_payments_paginated(db_session: AsyncSession) -> None:
     )
     assert total >= 1
     assert len(items) >= 1
+
+
+@pytest.mark.asyncio
+async def test_prepare_account_scenarios_service(db_session: AsyncSession) -> None:
+    """Test prepare_account_scenarios logic."""
+    from app.modules.payments.service import prepare_account_scenarios
+
+    acc = await _create_test_account(db_session, "Prep Acc")
+
+    mock_client = AsyncMock()
+    with patch(
+        "app.modules.accounts.session_pool.telegram_session_pool.get_connected_client",
+        new=AsyncMock(return_value=mock_client),
+    ):
+        result = await prepare_account_scenarios(db_session, acc.id)
+        assert result["status"] == "completed"
+        assert result["account_id"] == str(acc.id)
+        assert "mock_bot" in result["results"]

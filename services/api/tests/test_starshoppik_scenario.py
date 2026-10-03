@@ -251,3 +251,49 @@ async def test_starshoppik_missing_sbp_button_error(
             await scenario.create_payment(scenario_context)
 
         assert exc_info.value.code == "BOT_INTERACTION_ERROR"
+
+
+@pytest.mark.asyncio
+async def test_starshoppik_scenario_prepare() -> None:
+    """Test StarShoppikBotScenario prepare hook."""
+    account = TelegramAccount(
+        title="Prepare Test",
+        phone="+1234567890",
+        session_string="1BVtsOH...",
+        device_model="PC 64bit",
+        system_version="Windows 11",
+        app_version="5.2.2 x64",
+        status=AccountStatus.ACTIVE,
+    )
+    mock_client = AsyncMock()
+    mock_start = MagicMock()
+    mock_start.id = 50
+    mock_client.send_message = AsyncMock(return_value=mock_start)
+
+    btn_sub = MagicMock()
+    btn_sub.text = "Я подписался"
+
+    msg_reply = MagicMock()
+    msg_reply.id = 51
+    msg_reply.out = False
+    msg_reply.text = "Подпишитесь"
+    msg_reply.buttons = [[btn_sub]]
+
+    mock_client.get_messages = AsyncMock(return_value=[msg_reply])
+
+    with (
+        patch(
+            "app.modules.payments.scenarios.starshoppik_scenario.join_channel_safely",
+            new=AsyncMock(return_value=True),
+        ) as mock_join,
+        patch(
+            "app.modules.payments.scenarios.starshoppik_scenario.click_button_fast",
+            new=AsyncMock(),
+        ) as mock_click,
+    ):
+        scenario = StarShoppikBotScenario()
+        await scenario.prepare(account=account, client=mock_client)
+
+        mock_join.assert_awaited_once()
+        mock_client.send_message.assert_awaited_once()
+        mock_click.assert_awaited_once_with(mock_client, btn_sub)

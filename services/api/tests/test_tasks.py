@@ -90,3 +90,43 @@ async def test_accounts_tasks_direct(db_session: AsyncSession) -> None:
         )
         assert single_res["account_id"] == str(acc.id)
         assert single_res["status"] == "active"
+
+
+@pytest.mark.asyncio
+async def test_prepare_account_scenarios_task_direct(
+    db_session: AsyncSession,
+) -> None:
+    """Test direct execution of prepare_account_scenarios_task."""
+    from app.modules.payments.tasks import (
+        dispatch_account_scenarios_warmup,
+        prepare_account_scenarios_task,
+    )
+
+    acc = await _create_test_account(db_session, "Warmup Test Acc")
+
+    with patch(
+        "app.modules.payments.service.prepare_account_scenarios",
+        new=AsyncMock(
+            return_value={
+                "status": "completed",
+                "account_id": str(acc.id),
+                "results": {"mock_bot": "ok"},
+            }
+        ),
+    ) as mock_service:
+        res = await prepare_account_scenarios_task.original_func(
+            account_id=acc.id,
+            db=db_session,
+        )
+        assert res["status"] == "completed"
+        assert res["account_id"] == str(acc.id)
+        mock_service.assert_awaited_once_with(
+            session=db_session,
+            account_id=acc.id,
+        )
+
+    with patch.object(
+        prepare_account_scenarios_task, "kiq", new_callable=AsyncMock
+    ) as mock_kiq:
+        await dispatch_account_scenarios_warmup(acc.id)
+        mock_kiq.assert_awaited_once_with(account_id=acc.id)

@@ -7,11 +7,13 @@ and scenario dispatch. Follows Unit of Work: NEVER calls session.commit().
 import time
 from collections.abc import Sequence
 from datetime import UTC, datetime, timedelta
+from typing import Any
 from uuid import UUID
 
 from sqlmodel import col, func, select
 from sqlmodel.ext.asyncio.session import AsyncSession
 
+from app.core.logging import get_logger
 from app.modules.accounts.models import AccountStatus, TelegramAccount
 from app.modules.payments.exceptions import NoAccountsAvailableException
 from app.modules.payments.models import Payment, PaymentStatus
@@ -21,6 +23,8 @@ from app.modules.payments.scenarios import (
 )
 from app.modules.payments.schemas import PaymentCallback, PaymentCreate
 from app.shared.pagination import PageParams
+
+logger = get_logger(__name__)
 
 PAYMENT_TTL_MINUTES = 30
 
@@ -248,3 +252,63 @@ async def expire_overdue_payments(session: AsyncSession) -> int:
         await session.flush()
 
     return len(overdue)
+
+
+async def prepare_account_scenarios(
+    session: AsyncSession,
+    account_id: UUID,
+) -> dict[str, Any]:
+    """
+    Execute background warmup/preparation for all registered payment scenarios
+    for the given Telegram account (e.g. pre-joining channels, sending /start,
+    confirming subscriptions).
+    """
+
+    from app.modules.accounts.session_pool import telegram_session_pool
+
+    account = await session.get(TelegramAccount, account_id)
+    if not account:
+        logger.warning(
+            "Account not found for scenario preparation",
+            account_id=str(account_id),
+        )
+        return {"status": "error", "error": "Account not found"}
+
+    if account.status != AccountStatus.ACTIVE:
+        logger.warning(
+            "Skipping scenario preparation for inactive account",
+            account_id=str(account_id),
+            status=account.status.value,
+        )
+        return {
+            "status": "skipped",
+            "account_id": str(account.id),
+            "reason": f"Account is {account.status.value}",
+        }
+
+    client = await telegram_session_pool.get_connected_client(account)
+    results: dict[str, str] = {}
+
+    for scenario in scenario_registry.list():
+        try:
+            logger.info(
+                "preparing_scenario_for_account",
+                scenario_id=scenario.scenario_id,
+                account_id=str(account.id),
+            )
+            await scenario.prepare(account=account, client=client)
+            results[scenario.scenario_id] = "ok"
+        except Exception as exc:
+            logger.error(
+                "scenario_prepare_error",
+                scenario_id=scenario.scenario_id,
+                account_id=str(account.id),
+                error=str(exc),
+            )
+            results[scenario.scenario_id] = f"error: {exc}"
+
+    return {
+        "status": "completed",
+        "account_id": str(account.id),
+        "results": results,
+    }

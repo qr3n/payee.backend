@@ -54,3 +54,16 @@ class BasePaymentScenario(ABC):
         Default implementation is an intentional no-op.
         """
         return None
+
+    async def prepare(
+        self,
+        account: TelegramAccount,
+        client: Any,
+    ) -> None:
+        """
+        Optional hook to warm up and prepare account for this scenario
+        in background (e.g., joining channels, /start, subscriptions).
+        Default implementation is an intentional no-op.
+        """
+        del account, client
+        return None

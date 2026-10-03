@@ -210,6 +210,33 @@ async def on_check_account(
         await callback.answer(safe_alert_text(f"Ошибка: {exc}"), show_alert=True)
 
 
+async def on_prepare_account(
+    callback: CallbackQuery,
+    _button: Button,
+    dialog_manager: DialogManager,
+) -> None:
+    """Trigger background scenario preparation."""
+    account_id = dialog_manager.dialog_data.get("selected_account_id")
+    api_client: ApiClient = dialog_manager.middleware_data["api_client"]
+
+    if not account_id:
+        await callback.answer("Ошибка: аккаунт не выбран!", show_alert=True)
+        return
+
+    try:
+        await api_client.prepare_account(account_id)
+        dialog_manager.dialog_data["detail_msg"] = (
+            "⚡️ Запущена фоновая подготовка для всех сценариев "
+            "(вступление в каналы, /start и т.д.)"
+        )
+        await callback.answer("Подготовка запущена в фоне!", show_alert=False)
+    except Exception as exc:
+        dialog_manager.dialog_data["detail_msg"] = (
+            f"❌ Ошибка запуска подготовки: {exc}"
+        )
+        await callback.answer(safe_alert_text(f"Ошибка: {exc}"), show_alert=True)
+
+
 async def on_check_all_accounts(
     callback: CallbackQuery,
     _button: Button,
@@ -302,7 +329,8 @@ async def on_code_entered(
             return
 
         dialog_manager.dialog_data["last_action_msg"] = (
-            f"✅ {res.message or 'Аккаунт успешно добавлен!'}"
+            f"✅ {res.message or 'Аккаунт успешно добавлен!'}\n"
+            "<i>⚡️ В фоне запущена подготовка для всех сценариев.</i>"
         )
         await dialog_manager.switch_to(AccountsSG.list_accounts)
     except Exception as exc:
@@ -331,7 +359,8 @@ async def on_2fa_entered(
             two_fa_password=password,
         )
         dialog_manager.dialog_data["last_action_msg"] = (
-            f"✅ {res.message or 'Аккаунт успешно добавлен с 2FA!'}"
+            f"✅ {res.message or 'Аккаунт успешно добавлен с 2FA!'}\n"
+            "<i>⚡️ В фоне запущена подготовка для всех сценариев.</i>"
         )
         await dialog_manager.switch_to(AccountsSG.list_accounts)
     except Exception as exc:
@@ -427,7 +456,8 @@ async def on_json_file_received(
         user_info = f" (@{created.username})" if created.username else ""
         dialog_manager.dialog_data["last_action_msg"] = (
             f"✅ Сессия '{created.title}' (API ID: {created.api_id}) "
-            f"успешно добавлена! Статус: {status_text}{user_info}"
+            f"успешно добавлена! Статус: {status_text}{user_info}\n"
+            "<i>⚡️ В фоне запущена подготовка для всех сценариев.</i>"
         )
     except Exception as exc:
         dialog_manager.dialog_data["last_action_msg"] = (
@@ -720,12 +750,17 @@ account_detail_window = Window(
     Format("\n⚠️ <b>Последняя ошибка:</b> {last_error}", when="last_error"),
     Row(
         Button(
-            Const("🔄 Проверить статус"),
+            Const("🔄 Проверить"),
             id="btn_check_account",
             on_click=on_check_account,
         ),
         Button(
-            Const("🗑 Удалить сессию"),
+            Const("⚡️ Подготовить"),
+            id="btn_prepare_account",
+            on_click=on_prepare_account,
+        ),
+        Button(
+            Const("🗑 Удалить"),
             id="btn_delete_account",
             on_click=on_delete_account,
         ),

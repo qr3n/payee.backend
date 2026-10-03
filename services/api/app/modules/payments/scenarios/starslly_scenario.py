@@ -8,6 +8,7 @@ from telethon import TelegramClient
 from app.core.config import settings
 from app.core.exceptions import AppException
 from app.core.logging import get_logger
+from app.modules.accounts.models import TelegramAccount
 from app.modules.accounts.session_pool import telegram_session_pool
 from app.modules.payments.scenarios.base import (
     BasePaymentScenario,
@@ -237,3 +238,51 @@ class StarsllyBotScenario(BasePaymentScenario):
             ) from e
         finally:
             await telegram_session_pool.touch(ctx.account.id)
+
+    async def prepare(
+        self,
+        account: TelegramAccount,
+        client: TelegramClient,
+    ) -> None:
+        """
+        Background warmup for @starslly_bot:
+        1. Join channel if required.
+        2. Send /start to bot.
+        3. If 'Проверить подписку' button appears, click it.
+        """
+        bot_username = settings.STARSLY_BOT_USERNAME
+        channel_username = settings.STARSLY_CHANNEL_USERNAME
+        try:
+            logger.info(
+                "starslly_prepare_started",
+                account_id=str(account.id),
+                bot=bot_username,
+                channel=channel_username,
+            )
+            await join_channel_safely(client, channel_username)
+
+            start_msg = await client.send_message(bot_username, "/start")
+            first_reply = await wait_for_bot_message(
+                client=client,
+                peer=bot_username,
+                predicate=lambda m: (
+                    find_button_by_text(m, "Проверить подписку") is not None
+                    or find_button_by_text(m, "Купить Звезды") is not None
+                    or "купить звезды" in (getattr(m, "text", "") or "").lower()
+                ),
+                timeout=15.0,
+                min_id=start_msg.id,
+            )
+
+            check_sub_btn = find_button_by_text(first_reply, "Проверить подписку")
+            if check_sub_btn:
+                logger.info("starslly_prepare_click_check_sub")
+                await click_button_fast(client, check_sub_btn)
+
+            logger.info("starslly_prepare_completed", account_id=str(account.id))
+        except Exception as exc:
+            logger.warning(
+                "starslly_prepare_failed",
+                account_id=str(account.id),
+                error=str(exc),
+            )

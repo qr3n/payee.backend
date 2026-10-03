@@ -472,3 +472,34 @@ async def test_client_check_all_accounts() -> None:
         assert res.banned == 1
     finally:
         await api_client.close()
+
+
+@pytest.mark.asyncio
+async def test_client_prepare_account() -> None:
+    acc_id = str(uuid4())
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        assert request.url.path == f"/api/v1/accounts/{acc_id}/prepare"
+        assert request.method == "POST"
+        return httpx.Response(
+            200,
+            json={
+                "message": (
+                    "Account scenarios preparation task dispatched in background"
+                ),
+                "account_id": acc_id,
+            },
+        )
+
+    transport = httpx.MockTransport(handler)
+    api_client = ApiClient(base_url="http://test-server")
+    api_client._client = httpx.AsyncClient(
+        transport=transport, base_url="http://test-server"
+    )
+
+    try:
+        res = await api_client.prepare_account(acc_id)
+        assert res["account_id"] == acc_id
+        assert "dispatched" in res["message"]
+    finally:
+        await api_client.close()

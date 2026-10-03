@@ -4,13 +4,14 @@ FastAPI router endpoints for Telegram accounts management and verification.
 
 from uuid import UUID
 
-from fastapi import APIRouter, Depends, File, Form, UploadFile, status
+from fastapi import APIRouter, BackgroundTasks, Depends, File, Form, UploadFile, status
 from sqlmodel.ext.asyncio.session import AsyncSession
 
 from app.api.deps import get_db
 from app.core.exceptions import AppException, NotFoundException
 from app.modules.accounts import phone_auth_service
 from app.modules.accounts import service as account_service
+from app.modules.accounts.models import AccountStatus
 from app.modules.accounts.schemas import (
     CheckAllAccountsResponse,
     PhoneCodeRequest,
@@ -22,6 +23,7 @@ from app.modules.accounts.schemas import (
     TelegramAccountRead,
     TelegramAccountUpdate,
 )
+from app.modules.payments.tasks import dispatch_account_scenarios_warmup
 from app.shared.pagination import PageParams, PaginatedResponse
 
 router = APIRouter(prefix="/accounts", tags=["Telegram Accounts"])
@@ -39,10 +41,13 @@ router = APIRouter(prefix="/accounts", tags=["Telegram Accounts"])
 )
 async def create_account(
     account_in: TelegramAccountCreate,
+    background_tasks: BackgroundTasks,
     db: AsyncSession = Depends(get_db),
 ) -> TelegramAccountRead:
     """Create a new Telegram account session."""
     account = await account_service.create_account(session=db, account_in=account_in)
+    if account.status == AccountStatus.ACTIVE:
+        background_tasks.add_task(dispatch_account_scenarios_warmup, account.id)
     return TelegramAccountRead.model_validate(account)
 
 
@@ -62,6 +67,7 @@ async def upload_account_session(
     title: str | None = Form(default=None, description="Optional account label"),
     proxy_url: str | None = Form(default=None, description="Optional proxy override"),
     verify: bool = Form(default=True, description="Verify session via MTProto"),
+    background_tasks: BackgroundTasks = BackgroundTasks(),
     db: AsyncSession = Depends(get_db),
 ) -> TelegramAccountRead:
     """Import an account from .session + .json files."""
@@ -81,6 +87,8 @@ async def upload_account_session(
         proxy_url=proxy_url,
         verify=verify,
     )
+    if account.status == AccountStatus.ACTIVE:
+        background_tasks.add_task(dispatch_account_scenarios_warmup, account.id)
     return TelegramAccountRead.model_validate(account)
 
 
@@ -116,6 +124,7 @@ async def send_phone_code(
 )
 async def sign_in_phone(
     payload: PhoneSignInRequest,
+    background_tasks: BackgroundTasks,
     db: AsyncSession = Depends(get_db),
 ) -> PhoneSignInResponse:
     """Sign in using phone code or 2FA password."""
@@ -135,6 +144,8 @@ async def sign_in_phone(
         )
 
     acc = result.get("account")
+    if acc and acc.status == AccountStatus.ACTIVE:
+        background_tasks.add_task(dispatch_account_scenarios_warmup, acc.id)
     account_dto = TelegramAccountRead.model_validate(acc) if acc else None
     return PhoneSignInResponse(
         status="success",
@@ -255,3 +266,28 @@ async def check_all_accounts_endpoint(
     """Trigger batch verification of all Telegram accounts."""
     counts = await account_service.check_all_accounts(session=db)
     return CheckAllAccountsResponse(**counts)
+
+
+@router.post(
+    "/{account_id}/prepare",
+    summary="Prepare account for all payment scenarios",
+    description=(
+        "Asynchronously joins required channels, runs /start, and prepares "
+        "bot states for all scenarios."
+    ),
+)
+async def prepare_account_endpoint(
+    account_id: UUID,
+    background_tasks: BackgroundTasks,
+    db: AsyncSession = Depends(get_db),
+) -> dict[str, str]:
+    """Trigger background scenario preparation for the specified account."""
+    account = await account_service.get_account(session=db, account_id=account_id)
+    if not account:
+        raise NotFoundException(f"Telegram account with ID '{account_id}' not found.")
+
+    background_tasks.add_task(dispatch_account_scenarios_warmup, account.id)
+    return {
+        "message": "Account scenarios preparation task dispatched in background",
+        "account_id": str(account.id),
+    }

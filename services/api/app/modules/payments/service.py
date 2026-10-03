@@ -16,6 +16,7 @@ import uuid6
 from sqlmodel import col, func, select
 from sqlmodel.ext.asyncio.session import AsyncSession
 
+from app.core.exceptions import AppException
 from app.core.logging import get_logger
 from app.core.redis import get_redis_client
 from app.modules.accounts.models import AccountStatus, TelegramAccount
@@ -134,6 +135,35 @@ async def create_payment(
     expires_at = now + timedelta(minutes=PAYMENT_TTL_MINUTES)
     scenario = scenario_registry.get(payment_in.scenario_id)
 
+    # 0. Check idempotency if idempotency_key is provided
+    if payment_in.idempotency_key:
+        stmt = select(Payment).where(
+            Payment.client_user_id == payment_in.client_user_id,
+            Payment.idempotency_key == payment_in.idempotency_key,
+        )
+        existing_idem = (await session.exec(stmt)).first()
+        if existing_idem:
+            if (
+                existing_idem.scenario_id == payment_in.scenario_id
+                and existing_idem.amount == payment_in.amount
+                and existing_idem.currency == payment_in.currency
+            ):
+                logger.info(
+                    "payment_returned_by_idempotency_key",
+                    payment_id=str(existing_idem.id),
+                    idempotency_key=payment_in.idempotency_key,
+                )
+                return existing_idem
+            else:
+                raise AppException(
+                    message=(
+                        "Idempotency-Key already used with "
+                        "different payment parameters."
+                    ),
+                    code="IDEMPOTENCY_CONFLICT",
+                    status_code=409,
+                )
+
     # 1. Check if user already has an active pending payment
     account_lookup_start = time.perf_counter()
     existing_payment = await get_active_payment_for_user(
@@ -143,10 +173,8 @@ async def create_payment(
     account: TelegramAccount | None = None
 
     if existing_payment:
-        # Cancel previous payment
-        existing_payment.status = PaymentStatus.CANCELLED
-        existing_payment.cancelled_at = now
-        session.add(existing_payment)
+        # Cancel previous payment cleanly and release its reservations
+        await cancel_payment(session, existing_payment)
         await session.flush()
 
         # Re-use the same account if it's still active and not currently generating
@@ -197,6 +225,10 @@ async def create_payment(
             meta=payment_in.meta,
         )
         result = await scenario.create_payment(ctx)
+
+        # Release generation lock immediately after Telegram dialog finishes
+        # (before external SBP resolution)
+        await release_account_generation_lock(account.id)
 
         # 3. Attempt extraction of direct SBP (NSPK) link if supported gateway link
         t_resolve_start = time.perf_counter()
@@ -250,6 +282,7 @@ async def create_payment(
             scenario_id=scenario.scenario_id,
             amount=payment_in.amount,
             currency=payment_in.currency,
+            idempotency_key=payment_in.idempotency_key,
             account_id=account.id,
             status=PaymentStatus.PENDING,
             payment_link=resolved_link,
@@ -318,6 +351,18 @@ async def list_payments_paginated(
     return result.all(), total
 
 
+PROTECTED_INTERNAL_META_KEYS = {
+    "stars_count",
+    "stars_delta",
+    "base_stars_count",
+    "account_used",
+    "account_id",
+    "stage_timings",
+    "scenario_duration_sec",
+    "is_fast_path",
+}
+
+
 async def mark_payment_status(
     session: AsyncSession,
     db_payment: Payment,
@@ -325,9 +370,38 @@ async def mark_payment_status(
 ) -> Payment:
     """
     Update payment status from a webhook or callback.
-    Transitioning to PAID or CANCELLED immediately and reactively frees the account.
+    Enforces valid state machine transitions:
+    - PENDING -> PAID, CANCELLED, EXPIRED, FAILED
+    - Terminal states (PAID, CANCELLED, etc.) cannot be undone.
+    - Idempotent if target status matches current status.
+    - Protected internal meta fields cannot be overwritten by callback.
     """
     now = datetime.now(UTC)
+
+    # 1. State machine transition check
+    if db_payment.status == callback.status:
+        # Idempotent re-delivery
+        return db_payment
+
+    if db_payment.status == PaymentStatus.PAID:
+        raise AppException(
+            message="Платёж уже оплачен и не может изменить статус.",
+            code="PAYMENT_ALREADY_PAID",
+            status_code=409,
+        )
+
+    if db_payment.status in (
+        PaymentStatus.CANCELLED,
+        PaymentStatus.EXPIRED,
+        PaymentStatus.FAILED,
+    ):
+        raise AppException(
+            message=f"Платёж уже закрыт со статусом {db_payment.status.value}.",
+            code="PAYMENT_ALREADY_CLOSED",
+            status_code=409,
+        )
+
+    # Valid transition from PENDING
     db_payment.status = callback.status
 
     if callback.status == PaymentStatus.PAID:
@@ -335,26 +409,40 @@ async def mark_payment_status(
     elif callback.status == PaymentStatus.CANCELLED:
         db_payment.cancelled_at = now
 
+    # Read original stars_count BEFORE merging any callback metadata
+    stars_count = db_payment.meta.get("stars_count")
+
     if callback.external_transaction_id or callback.meta:
         updated_meta = dict(db_payment.meta)
         if callback.external_transaction_id:
             updated_meta["external_transaction_id"] = callback.external_transaction_id
         if callback.meta:
-            updated_meta.update(callback.meta)
+            # Filter out protected internal keys
+            safe_meta = {
+                k: v
+                for k, v in callback.meta.items()
+                if k not in PROTECTED_INTERNAL_META_KEYS
+            }
+            updated_meta.update(safe_meta)
         db_payment.meta = updated_meta
 
-    # Release any reserved stars count for the scenario
-    stars_count = db_payment.meta.get("stars_count")
-    if stars_count and db_payment.scenario_id:
-        await release_scenario_stars_reservation(
-            db_payment.scenario_id, int(stars_count)
-        )
+    # Release any reserved stars count for the scenario (on terminal states)
+    if callback.status in (
+        PaymentStatus.PAID,
+        PaymentStatus.CANCELLED,
+        PaymentStatus.EXPIRED,
+        PaymentStatus.FAILED,
+    ):
+        if stars_count and db_payment.scenario_id:
+            await release_scenario_stars_reservation(
+                db_payment.scenario_id, int(stars_count)
+            )
 
-    # Release any pending scenario slot lock (e.g. starslly_bot)
-    if db_payment.scenario_id and db_payment.account_id:
-        await release_scenario_pending_lock(
-            db_payment.scenario_id, db_payment.account_id
-        )
+        # Release any pending scenario slot lock (e.g. starslly_bot)
+        if db_payment.scenario_id and db_payment.account_id:
+            await release_scenario_pending_lock(
+                db_payment.scenario_id, db_payment.account_id
+            )
 
     session.add(db_payment)
     await session.flush()
@@ -366,7 +454,25 @@ async def cancel_payment(
     session: AsyncSession,
     db_payment: Payment,
 ) -> Payment:
-    """Cancel a pending payment and immediately unlock its assigned account."""
+    """
+    Cancel a pending payment and immediately unlock its assigned account.
+    If payment is already PAID, raises 409 conflict.
+    If already CANCELLED, EXPIRED, or FAILED, returns idempotently.
+    """
+    if db_payment.status == PaymentStatus.PAID:
+        raise AppException(
+            message="Нельзя отменить уже оплаченный платёж.",
+            code="PAYMENT_ALREADY_PAID",
+            status_code=409,
+        )
+
+    if db_payment.status in (
+        PaymentStatus.CANCELLED,
+        PaymentStatus.EXPIRED,
+        PaymentStatus.FAILED,
+    ):
+        return db_payment
+
     now = datetime.now(UTC)
     db_payment.status = PaymentStatus.CANCELLED
     db_payment.cancelled_at = now
@@ -488,32 +594,52 @@ async def prepare_account_scenarios(
             "reason": f"Account is {account.status.value}",
         }
 
-    client = await telegram_session_pool.get_connected_client(account)
-    results: dict[str, str] = {}
+    # Acquire exclusive generation lock to prevent collision with active payment
+    lock_token = await acquire_account_generation_lock(account.id, ttl_seconds=120)
+    if not lock_token:
+        logger.info(
+            "scenario_prepare_skipped_account_busy",
+            account_id=str(account.id),
+        )
+        return {
+            "status": "skipped",
+            "account_id": str(account.id),
+            "reason": "Account is busy generating a payment",
+        }
 
-    for scenario in scenario_registry.list():
-        try:
-            logger.info(
-                "preparing_scenario_for_account",
-                scenario_id=scenario.scenario_id,
-                account_id=str(account.id),
-            )
-            await scenario.prepare(account=account, client=client)
-            results[scenario.scenario_id] = "ok"
-        except Exception as exc:
-            logger.error(
-                "scenario_prepare_error",
-                scenario_id=scenario.scenario_id,
-                account_id=str(account.id),
-                error=str(exc),
-            )
-            results[scenario.scenario_id] = f"error: {exc}"
+    try:
+        client = await telegram_session_pool.get_connected_client(account)
+        results: dict[str, str] = {}
+        all_ok = True
 
-    return {
-        "status": "completed",
-        "account_id": str(account.id),
-        "results": results,
-    }
+        for scenario in scenario_registry.list():
+            try:
+                logger.info(
+                    "preparing_scenario_for_account",
+                    scenario_id=scenario.scenario_id,
+                    account_id=str(account.id),
+                )
+                res = await scenario.prepare(account=account, client=client)
+                results[scenario.scenario_id] = res.status
+                if res.status not in ("ok", "skipped"):
+                    all_ok = False
+            except Exception as exc:
+                logger.error(
+                    "scenario_prepare_error",
+                    scenario_id=scenario.scenario_id,
+                    account_id=str(account.id),
+                    error=str(exc),
+                )
+                results[scenario.scenario_id] = f"error: {exc}"
+                all_ok = False
+
+        return {
+            "status": "completed" if all_ok else "failed",
+            "account_id": str(account.id),
+            "results": results,
+        }
+    finally:
+        await release_account_generation_lock(account.id, owner_token=lock_token)
 
 
 async def prepare_single_scenario(
@@ -534,6 +660,20 @@ async def prepare_single_scenario(
     if not scenario:
         return {"status": "skipped", "reason": f"Scenario {scenario_id} not found"}
 
+    lock_token = await acquire_account_generation_lock(account.id, ttl_seconds=60)
+    if not lock_token:
+        logger.info(
+            "single_scenario_prepare_skipped_account_busy",
+            account_id=str(account.id),
+            scenario_id=scenario_id,
+        )
+        return {
+            "status": "skipped",
+            "account_id": str(account.id),
+            "scenario_id": scenario_id,
+            "reason": "Account is busy generating a payment",
+        }
+
     try:
         client = await telegram_session_pool.get_connected_client(account)
         logger.info(
@@ -541,11 +681,12 @@ async def prepare_single_scenario(
             scenario_id=scenario_id,
             account_id=str(account.id),
         )
-        await scenario.prepare(account=account, client=client)
+        res = await scenario.prepare(account=account, client=client)
         return {
-            "status": "completed",
+            "status": "completed" if res.status == "ok" else res.status,
             "account_id": str(account.id),
             "scenario_id": scenario_id,
+            "reason": res.reason,
         }
     except Exception as exc:
         logger.error(
@@ -555,6 +696,8 @@ async def prepare_single_scenario(
             error=str(exc),
         )
         return {"status": "error", "error": str(exc)}
+    finally:
+        await release_account_generation_lock(account.id, owner_token=lock_token)
 
 
 async def refresh_idle_account_scenarios(
@@ -687,6 +830,10 @@ async def _run_race_scenario_task(
 
         result = await scenario.create_payment(ctx)
 
+        # Release generation lock immediately after Telegram dialog finishes
+        # (before external SBP resolution)
+        await release_account_generation_lock(account.id)
+
         # SBP resolution
         t_resolve_start = time.perf_counter()
         resolved_link, is_resolved = await resolve_sbp_link(result.payment_link)
@@ -749,6 +896,10 @@ async def _run_race_scenario_task(
             except Exception:
                 await task_session.rollback()
                 raise
+    except asyncio.CancelledError:
+        if slot_locked:
+            await release_scenario_pending_lock(scenario_id, account.id)
+        raise
     except Exception:
         if slot_locked:
             await release_scenario_pending_lock(scenario_id, account.id)
@@ -916,24 +1067,27 @@ async def _race_background_runner(
     timed_out = False
 
     try:
-        for fut in asyncio.as_completed(tasks, timeout=race_in.timeout_sec):
-            try:
-                sse_event = await fut
-                succeeded += 1
-                await race_buffer.push_race_event(batch_id, sse_event)
-            except Exception as exc:
-                failed += 1
-                logger.error(
-                    "race_scenario_task_failed",
-                    batch_id=str(batch_id),
-                    error=str(exc),
-                )
-                err_payload = json.dumps(
-                    {"error": "scenario_failed", "message": str(exc)},
-                    ensure_ascii=False,
-                )
-                err_event = f"event: error\ndata: {err_payload}\n\n"
-                await race_buffer.push_race_event(batch_id, err_event)
+        async with asyncio.timeout(race_in.timeout_sec):
+            for fut in asyncio.as_completed(tasks):
+                try:
+                    sse_event = await fut
+                    succeeded += 1
+                    await race_buffer.push_race_event(batch_id, sse_event)
+                except asyncio.CancelledError:
+                    raise
+                except Exception as exc:
+                    failed += 1
+                    logger.error(
+                        "race_scenario_task_failed",
+                        batch_id=str(batch_id),
+                        error=str(exc),
+                    )
+                    err_payload = json.dumps(
+                        {"error": "scenario_failed", "message": str(exc)},
+                        ensure_ascii=False,
+                    )
+                    err_event = f"event: error\ndata: {err_payload}\n\n"
+                    await race_buffer.push_race_event(batch_id, err_event)
     except TimeoutError:
         timed_out = True
         logger.warning(
@@ -942,12 +1096,6 @@ async def _race_background_runner(
             timeout_sec=race_in.timeout_sec,
             succeeded=succeeded,
         )
-        for task in tasks:
-            task.cancel()
-        # Ensure cancelled tasks release their generation locks
-        for account, _ in pairs:
-            await release_account_generation_lock(account.id)
-
         timeout_payload = json.dumps(
             {
                 "error": "timeout",
@@ -958,12 +1106,19 @@ async def _race_background_runner(
         timeout_event = f"event: error\ndata: {timeout_payload}\n\n"
         await race_buffer.push_race_event(batch_id, timeout_event)
     except Exception as exc:
-        # Unexpected error in the runner itself — release all locks
         logger.error(
             "race_background_runner_error",
             batch_id=str(batch_id),
             error=str(exc),
         )
+    finally:
+        # Cancel all pending tasks and wait for them to finish cleanly
+        pending = [t for t in tasks if not t.done()]
+        for t in pending:
+            t.cancel()
+        if pending:
+            await asyncio.gather(*pending, return_exceptions=True)
+
         for account, _ in pairs:
             await release_account_generation_lock(account.id)
 
@@ -1019,9 +1174,12 @@ async def race_stream_generator(
         for event in existing:
             yield event
 
-        # If already finished, the "done" event is in the buffer — we're done
+        # If already finished, drain any newly added events up to cursor and exit
         status = await race_buffer.get_race_status(batch_id)
         if status != "running":
+            rem = await race_buffer.get_buffered_events(batch_id, start=cursor)
+            for event in rem:
+                yield event
             return
 
         # Live: poll Pub/Sub with periodic status fallback checks
@@ -1044,8 +1202,13 @@ async def race_stream_generator(
 
                 # Exit when race is done
                 if message.get("data") == "done":
+                    rem = await race_buffer.get_buffered_events(batch_id, start=cursor)
+                    for event in rem:
+                        yield event
                     return
             else:
+                # Heartbeat comment to keep connection alive through proxies
+                yield ": ping\n\n"
                 # Periodic fallback: race may have finished without us
                 # receiving the Pub/Sub notification
                 status = await race_buffer.get_race_status(batch_id)
@@ -1066,3 +1229,18 @@ async def race_stream_generator(
     finally:
         await pubsub.unsubscribe(channel)
         await pubsub.aclose()  # type: ignore[no-untyped-call]
+
+
+async def shutdown_active_races(timeout: float = 5.0) -> None:
+    """Gracefully cancel and await all active race tasks on application shutdown."""
+    if not _active_race_tasks:
+        return
+    tasks = list(_active_race_tasks)
+    logger.info("shutting_down_active_races", count=len(tasks))
+    for t in tasks:
+        t.cancel()
+    try:
+        async with asyncio.timeout(timeout):
+            await asyncio.gather(*tasks, return_exceptions=True)
+    except TimeoutError:
+        logger.warning("timeout_waiting_for_active_races_shutdown")

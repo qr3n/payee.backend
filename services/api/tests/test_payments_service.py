@@ -17,6 +17,7 @@ from app.modules.payments.exceptions import (
 from app.modules.payments.models import PaymentStatus
 from app.modules.payments.scenarios import (
     BasePaymentScenario,
+    PreparationResult,
     ScenarioContext,
     ScenarioResult,
     acquire_account_generation_lock,
@@ -383,15 +384,15 @@ async def test_prepare_account_scenarios_service(db_session: AsyncSession) -> No
         ),
         patch(
             "app.modules.payments.scenarios.starslly_scenario.StarsllyBotScenario.prepare",
-            new=AsyncMock(),
+            new=AsyncMock(return_value=PreparationResult(status="ok")),
         ),
         patch(
             "app.modules.payments.scenarios.starshoppik_scenario.StarShoppikBotScenario.prepare",
-            new=AsyncMock(),
+            new=AsyncMock(return_value=PreparationResult(status="ok")),
         ),
         patch(
             "app.modules.payments.scenarios.helperstars_scenario.HelperStarsBotScenario.prepare",
-            new=AsyncMock(),
+            new=AsyncMock(return_value=PreparationResult(status="ok")),
         ),
     ):
         result = await prepare_account_scenarios(db_session, acc.id)
@@ -440,15 +441,15 @@ async def test_refresh_idle_account_scenarios_service(
         ),
         patch(
             "app.modules.payments.scenarios.starslly_scenario.StarsllyBotScenario.prepare",
-            new=AsyncMock(),
+            new=AsyncMock(return_value=PreparationResult(status="ok")),
         ),
         patch(
             "app.modules.payments.scenarios.starshoppik_scenario.StarShoppikBotScenario.prepare",
-            new=AsyncMock(),
+            new=AsyncMock(return_value=PreparationResult(status="ok")),
         ),
         patch(
             "app.modules.payments.scenarios.helperstars_scenario.HelperStarsBotScenario.prepare",
-            new=AsyncMock(),
+            new=AsyncMock(return_value=PreparationResult(status="ok")),
         ),
     ):
         result = await refresh_idle_account_scenarios(db_session)

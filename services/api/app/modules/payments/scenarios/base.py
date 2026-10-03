@@ -30,6 +30,14 @@ class ScenarioResult:
     meta: dict[str, Any] = field(default_factory=dict)
 
 
+@dataclass(slots=True)
+class PreparationResult:
+    """Outcome of a scenario preparation step."""
+
+    status: str  # "ok", "skipped", "failed"
+    reason: str | None = None
+
+
 class BasePaymentScenario(ABC):
     """
     Abstract contract for bot payment scenarios.
@@ -61,11 +69,11 @@ class BasePaymentScenario(ABC):
         self,
         account: TelegramAccount,
         client: Any,
-    ) -> None:
+    ) -> PreparationResult:
         """
         Optional hook to warm up and prepare account for this scenario
         in background (e.g., joining channels, /start, subscriptions).
-        Default implementation is an intentional no-op.
+        Default implementation returns skipped.
         """
         del account, client
-        return None
+        return PreparationResult(status="skipped", reason="Not implemented")

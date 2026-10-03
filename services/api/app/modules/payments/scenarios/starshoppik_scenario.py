@@ -15,6 +15,7 @@ from app.modules.accounts.models import TelegramAccount
 from app.modules.accounts.session_pool import telegram_session_pool
 from app.modules.payments.scenarios.base import (
     BasePaymentScenario,
+    PreparationResult,
     ScenarioContext,
     ScenarioResult,
 )
@@ -90,7 +91,9 @@ class StarShoppikBotScenario(BasePaymentScenario):
             timer.record_stage("connect_session", "Подключение сессии из пула")
 
             # Check if chat is pre-warmed / waiting for amount
-            is_prep = await is_scenario_prepared(ctx.account.id, self.scenario_id)
+            is_prep = await is_scenario_prepared(
+                ctx.account.id, self.scenario_id, expected_recipient=recipient
+            )
             if is_prep:
                 try:
                     logger.info(
@@ -431,7 +434,7 @@ class StarShoppikBotScenario(BasePaymentScenario):
         self,
         account: TelegramAccount,
         client: TelegramClient,
-    ) -> None:
+    ) -> PreparationResult:
         """
         Background warmup for @StarShoppik_bot:
         1. Join channel if required.
@@ -531,8 +534,13 @@ class StarShoppikBotScenario(BasePaymentScenario):
                 timeout=15.0,
             )
 
-            await set_scenario_prepared(account.id, self.scenario_id)
+            await set_scenario_prepared(
+                account.id,
+                self.scenario_id,
+                context={"recipient": None, "bot_username": bot_username},
+            )
             logger.info("starshoppik_prepare_completed", account_id=str(account.id))
+            return PreparationResult(status="ok")
         except Exception as exc:
             await clear_scenario_prepared(account.id, self.scenario_id)
             logger.warning(
@@ -540,3 +548,4 @@ class StarShoppikBotScenario(BasePaymentScenario):
                 account_id=str(account.id),
                 error=str(exc),
             )
+            return PreparationResult(status="failed", reason=str(exc))

@@ -13,6 +13,7 @@ from app.modules.accounts.models import TelegramAccount
 from app.modules.accounts.session_pool import telegram_session_pool
 from app.modules.payments.scenarios.base import (
     BasePaymentScenario,
+    PreparationResult,
     ScenarioContext,
     ScenarioResult,
 )
@@ -97,7 +98,9 @@ class StarsllyBotScenario(BasePaymentScenario):
             timer.record_stage("connect_session", "Подключение сессии из пула")
 
             # Check if chat is pre-warmed / waiting for amount
-            is_prep = await is_scenario_prepared(ctx.account.id, self.scenario_id)
+            is_prep = await is_scenario_prepared(
+                ctx.account.id, self.scenario_id, expected_recipient=recipient
+            )
             if is_prep:
                 try:
                     logger.info(
@@ -402,7 +405,7 @@ class StarsllyBotScenario(BasePaymentScenario):
         self,
         account: TelegramAccount,
         client: TelegramClient,
-    ) -> None:
+    ) -> PreparationResult:
         """
         Background warmup for @starslly_bot:
         1. Join channel if required.
@@ -487,11 +490,16 @@ class StarsllyBotScenario(BasePaymentScenario):
                 min_id=send_user_msg.id,
             )
 
-            await set_scenario_prepared(account.id, self.scenario_id)
+            await set_scenario_prepared(
+                account.id,
+                self.scenario_id,
+                context={"recipient": recipient, "bot_username": bot_username},
+            )
             logger.info(
                 "starslly_prepare_completed_ready_for_amount",
                 account_id=str(account.id),
             )
+            return PreparationResult(status="ok")
         except Exception as exc:
             await clear_scenario_prepared(account.id, self.scenario_id)
             logger.warning(
@@ -499,3 +507,4 @@ class StarsllyBotScenario(BasePaymentScenario):
                 account_id=str(account.id),
                 error=str(exc),
             )
+            return PreparationResult(status="failed", reason=str(exc))

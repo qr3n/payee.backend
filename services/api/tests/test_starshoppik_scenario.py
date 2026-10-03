@@ -271,6 +271,8 @@ async def test_starshoppik_scenario_prepare() -> None:
         status=AccountStatus.ACTIVE,
     )
     mock_client = AsyncMock()
+    mock_client.add_event_handler = MagicMock()
+    mock_client.remove_event_handler = MagicMock()
     mock_start = MagicMock()
     mock_start.id = 50
     mock_client.send_message = AsyncMock(return_value=mock_start)

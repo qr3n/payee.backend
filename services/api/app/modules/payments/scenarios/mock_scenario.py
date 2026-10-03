@@ -9,6 +9,7 @@ from telethon import TelegramClient
 from app.modules.accounts.models import TelegramAccount
 from app.modules.payments.scenarios.base import (
     BasePaymentScenario,
+    PreparationResult,
     ScenarioContext,
     ScenarioResult,
 )
@@ -67,6 +68,7 @@ class MockBotScenario(BasePaymentScenario):
         self,
         account: TelegramAccount,
         client: TelegramClient,
-    ) -> None:
+    ) -> PreparationResult:
         _ = client
         await set_scenario_prepared(account.id, self.scenario_id)
+        return PreparationResult(status="ok")

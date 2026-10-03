@@ -4,6 +4,7 @@ Payment Scenarios package.
 
 from app.modules.payments.scenarios.base import (
     BasePaymentScenario,
+    PreparationResult,
     ScenarioContext,
     ScenarioResult,
 )
@@ -47,6 +48,7 @@ __all__ = [
     "BasePaymentScenario",
     "HelperStarsBotScenario",
     "MockBotScenario",
+    "PreparationResult",
     "ScenarioContext",
     "ScenarioRegistry",
     "ScenarioResult",

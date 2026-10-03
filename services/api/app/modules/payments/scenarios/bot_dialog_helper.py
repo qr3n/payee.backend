@@ -165,6 +165,8 @@ async def wait_for_bot_message(
         if not result_future.done():
             msg = getattr(event, "message", None)
             if msg and not getattr(msg, "out", False):
+                if min_id is not None and getattr(msg, "id", 0) <= min_id:
+                    return
                 try:
                     check_bot_blocked_message(msg)
                 except AppException as exc:
@@ -173,8 +175,10 @@ async def wait_for_bot_message(
                 if predicate(msg):
                     result_future.set_result(msg)
 
-    h_new = client.add_event_handler(on_event, events.NewMessage(chats=peer))
-    h_edit = client.add_event_handler(on_event, events.MessageEdited(chats=peer))
+    ev_new = events.NewMessage(chats=peer)
+    ev_edit = events.MessageEdited(chats=peer)
+    client.add_event_handler(on_event, ev_new)
+    client.add_event_handler(on_event, ev_edit)
 
     start_time = loop.time()
     try:
@@ -206,11 +210,13 @@ async def wait_for_bot_message(
 
         return result_future.result()
     finally:
+        if not result_future.done():
+            result_future.cancel()
         import inspect
 
-        res_new = client.remove_event_handler(h_new)
+        res_new = client.remove_event_handler(on_event, ev_new)
         if inspect.isawaitable(res_new):
             await res_new
-        res_edit = client.remove_event_handler(h_edit)
+        res_edit = client.remove_event_handler(on_event, ev_edit)
         if inspect.isawaitable(res_edit):
             await res_edit

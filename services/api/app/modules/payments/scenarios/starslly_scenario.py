@@ -56,6 +56,8 @@ class StarsllyBotScenario(BasePaymentScenario):
     description = (
         "Automated creation of Telegram Stars payment links through @starslly_bot"
     )
+    is_fallback = True
+    requires_exclusive_pending_slot = True
 
     async def create_payment(self, ctx: ScenarioContext) -> ScenarioResult:
         bot_username = ctx.meta.get("bot_username") or settings.STARSLY_BOT_USERNAME

@@ -112,6 +112,7 @@ async def list_scenarios() -> list[ScenarioRead]:
             scenario_id=s.scenario_id,
             name=s.name,
             description=s.description,
+            is_fallback=getattr(s, "is_fallback", False),
         )
         for s in scenarios
     ]

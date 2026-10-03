@@ -24,10 +24,14 @@ from app.modules.payments.resolvers import resolve_sbp_link
 from app.modules.payments.scenarios import (
     ScenarioContext,
     acquire_account_generation_lock,
+    acquire_scenario_pending_lock,
     is_account_generation_locked,
+    is_scenario_pending_locked,
     release_account_generation_lock,
     release_all_account_generation_locks,
+    release_all_scenario_pending_locks,
     release_all_scenario_stars_reservations,
+    release_scenario_pending_lock,
     release_scenario_stars_reservation,
     scenario_registry,
 )
@@ -64,10 +68,15 @@ async def get_active_payment_for_user(
 
 async def acquire_free_account(
     session: AsyncSession,
+    scenario_id: str | None = None,
 ) -> TelegramAccount | None:
     """
     Find an active Telegram account not currently locked by an active generation.
     Accounts are locked exclusively for invoice generation (5-15s), not 30m pending.
+    If the scenario requires an exclusive pending slot (e.g. starslly_bot), ensures
+    the account does not currently hold a pending slot for this scenario.
+    Prioritizes accounts: for non-exclusive scenarios, prefers accounts that ALREADY
+    have exclusive slots occupied to preserve free slots for exclusive scenarios.
     """
     statement = (
         select(TelegramAccount)
@@ -77,9 +86,28 @@ async def acquire_free_account(
         .order_by(col(TelegramAccount.updated_at).asc())
     )
     result = await session.exec(statement)
-    active_accounts = result.all()
+    active_accounts = list(result.all())
 
-    for account in active_accounts:
+    scenario = scenario_registry.get(scenario_id) if scenario_id else None
+    requires_slot = getattr(scenario, "requires_exclusive_pending_slot", False)
+
+    candidates: list[TelegramAccount] = []
+    if requires_slot and scenario:
+        for acc in active_accounts:
+            if not await is_scenario_pending_locked(scenario.scenario_id, acc.id):
+                candidates.append(acc)
+    else:
+        # Prioritize accounts where starslly_bot slot is already locked
+        has_slot_busy: list[TelegramAccount] = []
+        is_clean: list[TelegramAccount] = []
+        for acc in active_accounts:
+            if await is_scenario_pending_locked("starslly_bot", acc.id):
+                has_slot_busy.append(acc)
+            else:
+                is_clean.append(acc)
+        candidates = has_slot_busy + is_clean
+
+    for account in candidates:
         if await acquire_account_generation_lock(account.id):
             return account
     return None
@@ -122,19 +150,38 @@ async def create_payment(
         )
         acc_result = await session.exec(acc_stmt)
         candidate = acc_result.first()
-        if candidate and await acquire_account_generation_lock(candidate.id):
-            account = candidate
+        if candidate:
+            candidate_available = True
+            if getattr(
+                scenario, "requires_exclusive_pending_slot", False
+            ) and await is_scenario_pending_locked(scenario.scenario_id, candidate.id):
+                candidate_available = False
+            if candidate_available and await acquire_account_generation_lock(
+                candidate.id
+            ):
+                account = candidate
 
     # If no existing active payment or candidate was busy, acquire a free one
     if not account:
-        account = await acquire_free_account(session)
+        account = await acquire_free_account(session, scenario_id=scenario.scenario_id)
 
     account_lookup_duration = round(time.perf_counter() - account_lookup_start, 2)
 
     if not account:
         raise NoAccountsAvailableException()
 
+    slot_locked = False
     try:
+        # If scenario requires exclusive pending slot, acquire it now
+        if getattr(scenario, "requires_exclusive_pending_slot", False):
+            if not await acquire_scenario_pending_lock(
+                scenario.scenario_id, account.id
+            ):
+                raise NoAccountsAvailableException(
+                    "All account slots for this payment provider are currently busy."
+                )
+            slot_locked = True
+
         # 2. Execute scenario to generate payment link
         ctx = ScenarioContext(
             client_user_id=payment_in.client_user_id,
@@ -209,6 +256,10 @@ async def create_payment(
         session.add(payment)
         await session.flush()
         await session.refresh(payment)
+    except Exception:
+        if slot_locked:
+            await release_scenario_pending_lock(scenario.scenario_id, account.id)
+        raise
     finally:
         # Release the generation lock immediately once link is obtained or upon error
         await release_account_generation_lock(account.id)
@@ -293,6 +344,12 @@ async def mark_payment_status(
             db_payment.scenario_id, int(stars_count)
         )
 
+    # Release any pending scenario slot lock (e.g. starslly_bot)
+    if db_payment.scenario_id and db_payment.account_id:
+        await release_scenario_pending_lock(
+            db_payment.scenario_id, db_payment.account_id
+        )
+
     session.add(db_payment)
     await session.flush()
     await session.refresh(db_payment)
@@ -312,6 +369,11 @@ async def cancel_payment(
     if stars_count and db_payment.scenario_id:
         await release_scenario_stars_reservation(
             db_payment.scenario_id, int(stars_count)
+        )
+
+    if db_payment.scenario_id and db_payment.account_id:
+        await release_scenario_pending_lock(
+            db_payment.scenario_id, db_payment.account_id
         )
 
     session.add(db_payment)
@@ -340,6 +402,8 @@ async def expire_overdue_payments(session: AsyncSession) -> int:
             await release_scenario_stars_reservation(
                 payment.scenario_id, int(stars_count)
             )
+        if payment.scenario_id and payment.account_id:
+            await release_scenario_pending_lock(payment.scenario_id, payment.account_id)
         session.add(payment)
 
     if overdue:
@@ -372,9 +436,10 @@ async def release_all_locked_accounts(session: AsyncSession) -> tuple[int, int]:
     if active_pending:
         await session.flush()
 
-    # Release any lingering Redis generation locks and stars reservations
+    # Release lingering Redis generation, stars, and pending slot locks
     cleared_redis_locks = await release_all_account_generation_locks()
     await release_all_scenario_stars_reservations()
+    await release_all_scenario_pending_locks()
 
     logger.info(
         "all_locked_accounts_released",
@@ -593,10 +658,18 @@ async def _run_race_scenario_task(
         scenario_registry as _registry,
     )
 
+    slot_locked = False
     try:
         scenario = _registry.get(scenario_id)
         if not scenario:
             raise ValueError(f"Scenario {scenario_id!r} not found in registry")
+
+        if getattr(scenario, "requires_exclusive_pending_slot", False):
+            if not await acquire_scenario_pending_lock(
+                scenario.scenario_id, account.id
+            ):
+                raise ValueError(f"Account slot for {scenario_id} is already occupied")
+            slot_locked = True
 
         ctx = ScenarioContext(
             client_user_id=race_in.client_user_id,
@@ -670,6 +743,10 @@ async def _run_race_scenario_task(
             except Exception:
                 await task_session.rollback()
                 raise
+    except Exception:
+        if slot_locked:
+            await release_scenario_pending_lock(scenario_id, account.id)
+        raise
     finally:
         # Guarantee generation lock is released once link is obtained or upon error
         await release_account_generation_lock(account.id)
@@ -724,7 +801,10 @@ async def create_payment_race_generator(
     now = datetime.now(UTC)
     expires_at = now + timedelta(minutes=PAYMENT_TTL_MINUTES)
     batch_id: UUID = uuid6.uuid7()
-    scenarios = scenario_registry.list()
+    if race_in.scenario_ids:
+        scenarios = [scenario_registry.get(s) for s in race_in.scenario_ids]
+    else:
+        scenarios = scenario_registry.list_primary()
     num_scenarios = len(scenarios)
 
     # Acquire free accounts (one per scenario, up to num_scenarios)
@@ -747,15 +827,35 @@ async def create_payment_race_generator(
         yield f"event: done\ndata: {done_data}\n\n"
         return
 
-    # Build (account, scenario_id) pairs
-    pairs: list[tuple[TelegramAccount, str]] = [
-        (account, scenario.scenario_id)
-        for account, scenario in zip(free_accounts, scenarios, strict=False)
+    # Prioritize accounts with free slots for exclusive scenarios
+    pairs: list[tuple[TelegramAccount, str]] = []
+    remaining_accounts = list(free_accounts)
+
+    exclusive_scenarios = [
+        s for s in scenarios if getattr(s, "requires_exclusive_pending_slot", False)
+    ]
+    non_exclusive_scenarios = [
+        s for s in scenarios if not getattr(s, "requires_exclusive_pending_slot", False)
     ]
 
+    for s in exclusive_scenarios:
+        assigned_acc = None
+        for acc in remaining_accounts:
+            if not await is_scenario_pending_locked(s.scenario_id, acc.id):
+                assigned_acc = acc
+                break
+        if assigned_acc:
+            remaining_accounts.remove(assigned_acc)
+            pairs.append((assigned_acc, s.scenario_id))
+
+    for s in non_exclusive_scenarios:
+        if remaining_accounts:
+            acc = remaining_accounts.pop(0)
+            pairs.append((acc, s.scenario_id))
+
     # If we acquired more accounts than scenarios, release extra locks immediately
-    if len(free_accounts) > len(pairs):
-        for unused_acc in free_accounts[len(pairs) :]:
+    if remaining_accounts:
+        for unused_acc in remaining_accounts:
             await release_account_generation_lock(unused_acc.id)
 
     started_data = json.dumps(

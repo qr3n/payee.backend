@@ -208,3 +208,80 @@ async def release_all_scenario_stars_reservations() -> int:
             "failed_releasing_all_scenario_stars_reservations", error=str(exc)
         )
         return 0
+
+
+def _scenario_pending_lock_key(scenario_id: str, account_id: UUID | str) -> str:
+    return f"lock:scenario_pending:{scenario_id}:{account_id}"
+
+
+async def acquire_scenario_pending_lock(
+    scenario_id: str,
+    account_id: UUID | str,
+    ttl_seconds: int = 1800,  # 30 minutes
+) -> bool:
+    """
+    Atomically acquire a pending order reservation for a scenario on a specific account.
+    Used for scenarios (like starslly_bot) that do not provide order IDs in confirmation
+    messages, ensuring at most 1 pending order exists per account.
+    """
+    try:
+        redis = get_redis()
+        res = await redis.set(
+            _scenario_pending_lock_key(scenario_id, account_id),
+            "1",
+            nx=True,
+            ex=ttl_seconds,
+        )
+        return bool(res)
+    except Exception as exc:
+        logger.warning(
+            "failed_acquiring_scenario_pending_lock",
+            scenario_id=scenario_id,
+            account_id=str(account_id),
+            error=str(exc),
+        )
+        return True
+
+
+async def release_scenario_pending_lock(
+    scenario_id: str,
+    account_id: UUID | str,
+) -> None:
+    """Release pending reservation for a scenario on an account."""
+    try:
+        redis = get_redis()
+        await redis.delete(_scenario_pending_lock_key(scenario_id, account_id))
+    except Exception as exc:
+        logger.debug(
+            "failed_releasing_scenario_pending_lock",
+            scenario_id=scenario_id,
+            account_id=str(account_id),
+            error=str(exc),
+        )
+
+
+async def is_scenario_pending_locked(
+    scenario_id: str,
+    account_id: UUID | str,
+) -> bool:
+    """Check if an account already has an active pending order for this scenario."""
+    try:
+        redis = get_redis()
+        val = await redis.get(_scenario_pending_lock_key(scenario_id, account_id))
+        return val is not None
+    except Exception:
+        return False
+
+
+async def release_all_scenario_pending_locks() -> int:
+    """Release all pending scenario lock keys across all accounts."""
+    try:
+        redis = get_redis()
+        keys = await redis.keys("lock:scenario_pending:*")
+        if keys:
+            deleted = await redis.delete(*keys)
+            return int(deleted)
+        return 0
+    except Exception as exc:
+        logger.warning("failed_releasing_all_scenario_pending_locks", error=str(exc))
+        return 0

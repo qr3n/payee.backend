@@ -75,6 +75,10 @@ class ScenarioRead(BaseModel):
     scenario_id: str = Field(description="Unique scenario identifier")
     name: str = Field(description="Human-readable scenario title")
     description: str = Field(description="Scenario description")
+    is_fallback: bool = Field(
+        default=False,
+        description="Whether this scenario is an emergency fallback",
+    )
 
 
 class PaymentRaceCreate(BaseModel):
@@ -96,6 +100,14 @@ class PaymentRaceCreate(BaseModel):
         max_length=16,
         description="Currency code (e.g. RUB, USDT, USD)",
         examples=["RUB"],
+    )
+    scenario_ids: list[str] | None = Field(
+        default=None,
+        description=(
+            "Optional list of specific scenario IDs to race. "
+            "If omitted, races primary non-fallback scenarios."
+        ),
+        examples=[["starshoppik_bot", "helperstars_bot"]],
     )
     timeout_sec: float = Field(
         default=120.0,

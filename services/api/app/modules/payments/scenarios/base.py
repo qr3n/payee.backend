@@ -39,6 +39,8 @@ class BasePaymentScenario(ABC):
     scenario_id: str
     name: str
     description: str = ""
+    is_fallback: bool = False
+    requires_exclusive_pending_slot: bool = False
 
     @abstractmethod
     async def create_payment(self, ctx: ScenarioContext) -> ScenarioResult:

@@ -3,6 +3,8 @@ Registry for payment scenarios.
 Allows dynamic lookup and registration of different bot payment strategies.
 """
 
+import builtins
+
 from app.modules.payments.exceptions import UnknownScenarioException
 from app.modules.payments.scenarios.base import BasePaymentScenario
 from app.modules.payments.scenarios.helperstars_scenario import (
@@ -35,9 +37,15 @@ class ScenarioRegistry:
             raise UnknownScenarioException(scenario_id)
         return scenario
 
-    def list(self) -> list[BasePaymentScenario]:
+    def list(self) -> builtins.list[BasePaymentScenario]:
         """Return all registered scenarios."""
         return list(self._scenarios.values())
+
+    def list_primary(self) -> builtins.list[BasePaymentScenario]:
+        """Return registered scenarios that are primary (non-fallback)."""
+        return [
+            s for s in self._scenarios.values() if not getattr(s, "is_fallback", False)
+        ]
 
 
 scenario_registry = ScenarioRegistry()

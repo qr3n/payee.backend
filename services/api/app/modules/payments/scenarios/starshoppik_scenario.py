@@ -260,7 +260,12 @@ class StarShoppikBotScenario(BasePaymentScenario):
         """Full-path: /start -> sub -> menus -> amount -> recipient -> sbp -> link."""
         _ = ctx
         logger.info("starshoppik_step_1_sending_start", bot=bot_username)
-        start_msg = await client.send_message(bot_username, "/start")
+        start_cmd = (
+            f"/start {settings.STARSHOPPIK_START_PARAM}"
+            if settings.STARSHOPPIK_START_PARAM
+            else "/start"
+        )
+        start_msg = await client.send_message(bot_username, start_cmd)
 
         first_reply = await wait_for_bot_message(
             client=client,
@@ -444,7 +449,12 @@ class StarShoppikBotScenario(BasePaymentScenario):
             logger.info("starshoppik_prepare_started", account_id=str(account.id))
             await join_channel_safely(client, channel_username)
 
-            start_msg = await client.send_message(bot_username, "/start")
+            start_cmd = (
+                f"/start {settings.STARSHOPPIK_START_PARAM}"
+                if settings.STARSHOPPIK_START_PARAM
+                else "/start"
+            )
+            start_msg = await client.send_message(bot_username, start_cmd)
             first_reply = await wait_for_bot_message(
                 client=client,
                 peer=bot_username,

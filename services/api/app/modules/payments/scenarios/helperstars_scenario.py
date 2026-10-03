@@ -278,7 +278,12 @@ class HelperStarsBotScenario(BasePaymentScenario):
         """
         _ = ctx
         logger.info("helperstars_step_1_sending_start", bot=bot_username)
-        start_msg = await client.send_message(bot_username, "/start")
+        start_cmd = (
+            f"/start {settings.HELPERSTARS_START_PARAM}"
+            if settings.HELPERSTARS_START_PARAM
+            else "/start"
+        )
+        start_msg = await client.send_message(bot_username, start_cmd)
 
         first_reply = await wait_for_bot_message(
             client=client,
@@ -490,7 +495,12 @@ class HelperStarsBotScenario(BasePaymentScenario):
             logger.info("helperstars_prepare_started", account_id=str(account.id))
             await join_channel_safely(client, channel_username)
 
-            start_msg = await client.send_message(bot_username, "/start")
+            start_cmd = (
+                f"/start {settings.HELPERSTARS_START_PARAM}"
+                if settings.HELPERSTARS_START_PARAM
+                else "/start"
+            )
+            start_msg = await client.send_message(bot_username, start_cmd)
             first_reply = await wait_for_bot_message(
                 client=client,
                 peer=bot_username,

@@ -2,9 +2,14 @@
 State management for pre-warmed / prepared MTProto scenario chats in Redis.
 Tracks whether an account's chat with a target bot is currently sitting
 at the amount input prompt (fast-path ready).
+Implements fail-closed distributed locks with owner tokens and Lua release scripts.
 """
 
+import json
+from typing import Any
 from uuid import UUID
+
+import uuid6
 
 from app.core.logging import get_logger
 from app.core.redis import get_redis
@@ -13,38 +18,102 @@ logger = get_logger(__name__)
 
 DEFAULT_PREPARATION_TTL_SECONDS = 900  # 15 minutes
 
+# Atomic Lua release script: deletes key ONLY if its value matches the owner token
+LUA_RELEASE_LOCK = """
+if redis.call("GET", KEYS[1]) == ARGV[1] then
+    return redis.call("DEL", KEYS[1])
+else
+    return 0
+end
+"""
+
+# Atomic Lua extend script: extends TTL ONLY if its value matches the owner token
+LUA_EXTEND_LOCK = """
+if redis.call("GET", KEYS[1]) == ARGV[1] then
+    return redis.call("EXPIRE", KEYS[1], ARGV[2])
+else
+    return 0
+end
+"""
+
 
 def _prep_key(account_id: UUID | str, scenario_id: str) -> str:
     return f"scenario_prep:{account_id}:{scenario_id}"
 
 
-async def is_scenario_prepared(account_id: UUID | str, scenario_id: str) -> bool:
-    """Check if the account's dialog with the scenario bot is ready for amount input."""
+async def get_scenario_prepared_context(
+    account_id: UUID | str, scenario_id: str
+) -> dict[str, Any] | None:
+    """Retrieve full preparation context from Redis."""
     try:
         redis = get_redis()
-        val = await redis.get(_prep_key(account_id, scenario_id))
-        return val == "ready_for_amount"
+        raw = await redis.get(_prep_key(account_id, scenario_id))
+        if not raw:
+            return None
+        if isinstance(raw, bytes):
+            raw = raw.decode("utf-8")
+        if raw.startswith("{"):
+            return json.loads(raw)  # type: ignore[no-any-return]
+        # Backward compatibility with plain string status
+        return {"status": raw}
     except Exception as exc:
         logger.debug(
-            "redis_prep_state_check_failed",
+            "redis_prep_context_get_failed",
             account_id=str(account_id),
             scenario_id=scenario_id,
             error=str(exc),
         )
+        return None
+
+
+async def is_scenario_prepared(
+    account_id: UUID | str,
+    scenario_id: str,
+    expected_recipient: str | None = None,
+) -> bool:
+    """
+    Check if the account's dialog with the scenario bot is ready for amount input.
+    If expected_recipient is provided, verifies that dialog was prepared
+    for that exact recipient.
+    """
+    ctx = await get_scenario_prepared_context(account_id, scenario_id)
+    if not ctx or ctx.get("status") != "ready_for_amount":
         return False
+
+    if expected_recipient is not None:
+        stored_recipient = ctx.get("recipient")
+        if stored_recipient is not None:
+            norm_expected = expected_recipient.lstrip("@").lower()
+            norm_stored = str(stored_recipient).lstrip("@").lower()
+            if norm_expected != norm_stored:
+                logger.info(
+                    "prepared_scenario_recipient_mismatch",
+                    account_id=str(account_id),
+                    scenario_id=scenario_id,
+                    expected=norm_expected,
+                    stored=norm_stored,
+                )
+                return False
+
+    return True
 
 
 async def set_scenario_prepared(
     account_id: UUID | str,
     scenario_id: str,
+    context: dict[str, Any] | None = None,
     ttl_seconds: int = DEFAULT_PREPARATION_TTL_SECONDS,
 ) -> None:
     """Mark the account's dialog with the scenario bot as ready for amount input."""
     try:
         redis = get_redis()
+        data = {
+            "status": "ready_for_amount",
+            **(context or {}),
+        }
         await redis.set(
             _prep_key(account_id, scenario_id),
-            "ready_for_amount",
+            json.dumps(data, ensure_ascii=False),
             ex=ttl_seconds,
         )
         logger.info(
@@ -85,40 +154,67 @@ def _generation_lock_key(account_id: UUID | str) -> str:
 
 async def acquire_account_generation_lock(
     account_id: UUID | str,
+    owner_token: str | None = None,
     ttl_seconds: int = 90,
-) -> bool:
+) -> str | None:
     """
     Atomically acquire an exclusive generation lock for an account in Redis.
-    Locks the account ONLY for the duration of invoice generation (5-15s).
-    Auto-expires in 90 seconds if the process dies unexpectedly.
+    Returns the unique owner_token (truthy) if acquired, or None if busy/failed.
+    Fails closed (returns None) on Redis errors.
     """
+    token = owner_token or str(uuid6.uuid7())
     try:
         redis = get_redis()
         res = await redis.set(
-            _generation_lock_key(account_id), "1", nx=True, ex=ttl_seconds
+            _generation_lock_key(account_id), token, nx=True, ex=ttl_seconds
         )
-        return bool(res)
+        return token if res else None
     except Exception as exc:
-        logger.warning(
+        logger.error(
             "failed_acquiring_account_generation_lock",
             account_id=str(account_id),
             error=str(exc),
         )
-        # Fallback to True if Redis check fails to avoid completely halting
-        return True
+        return None
 
 
-async def release_account_generation_lock(account_id: UUID | str) -> None:
-    """Immediately release the generation lock once payment link is produced."""
+async def _eval_release_lock(redis: Any, key: str, owner_token: str | None) -> bool:
+    if owner_token is not None:
+        try:
+            res = await redis.eval(LUA_RELEASE_LOCK, 1, key, owner_token)
+            return bool(res)
+        except Exception:
+            # Fallback for fake/mock redis environments that lack Lua eval
+            val = await redis.get(key)
+            if val is not None:
+                val_str = val.decode("utf-8") if isinstance(val, bytes) else str(val)
+                if val_str == str(owner_token):
+                    await redis.delete(key)
+                    return True
+            return False
+    await redis.delete(key)
+    return True
+
+
+async def release_account_generation_lock(
+    account_id: UUID | str,
+    owner_token: str | None = None,
+) -> bool:
+    """
+    Release the generation lock.
+    If owner_token is specified, verifies ownership before deletion.
+    """
     try:
         redis = get_redis()
-        await redis.delete(_generation_lock_key(account_id))
+        key = _generation_lock_key(account_id)
+        return await _eval_release_lock(redis, key, owner_token)
     except Exception as exc:
         logger.debug(
             "failed_releasing_account_generation_lock",
             account_id=str(account_id),
             error=str(exc),
         )
+        return False
 
 
 async def is_account_generation_locked(account_id: UUID | str) -> bool:
@@ -132,14 +228,14 @@ async def is_account_generation_locked(account_id: UUID | str) -> bool:
 
 
 async def release_all_account_generation_locks() -> int:
-    """Release all active account generation locks from Redis."""
+    """Release all active account generation locks from Redis using scan_iter."""
     try:
         redis = get_redis()
-        keys = await redis.keys("lock:account_generation:*")
-        if keys:
-            deleted = await redis.delete(*keys)
-            return int(deleted)
-        return 0
+        deleted = 0
+        async for key in redis.scan_iter("lock:account_generation:*", count=100):
+            await redis.delete(key)
+            deleted += 1
+        return deleted
     except Exception as exc:
         logger.warning("failed_releasing_all_account_generation_locks", error=str(exc))
         return 0
@@ -152,39 +248,43 @@ def _scenario_stars_lock_key(scenario_id: str, stars_count: int) -> str:
 async def acquire_scenario_stars_reservation(
     scenario_id: str,
     stars_count: int,
+    owner_token: str | None = None,
     ttl_seconds: int = 1800,  # 30 minutes (matches payment TTL)
-) -> bool:
+) -> str | None:
     """
     Atomically reserve a specific stars_count for a scenario in Redis.
-    Prevents two concurrent open invoices from sharing the exact same stars count.
+    Returns owner token if acquired, or None if occupied or failed.
     """
+    token = owner_token or str(uuid6.uuid7())
     try:
         redis = get_redis()
         res = await redis.set(
             _scenario_stars_lock_key(scenario_id, stars_count),
-            "1",
+            token,
             nx=True,
             ex=ttl_seconds,
         )
-        return bool(res)
+        return token if res else None
     except Exception as exc:
-        logger.warning(
+        logger.error(
             "failed_acquiring_scenario_stars_reservation",
             scenario_id=scenario_id,
             stars_count=stars_count,
             error=str(exc),
         )
-        return True
+        return None
 
 
 async def release_scenario_stars_reservation(
     scenario_id: str,
     stars_count: int,
-) -> None:
+    owner_token: str | None = None,
+) -> bool:
     """Release a reserved stars count for a scenario."""
     try:
         redis = get_redis()
-        await redis.delete(_scenario_stars_lock_key(scenario_id, stars_count))
+        key = _scenario_stars_lock_key(scenario_id, stars_count)
+        return await _eval_release_lock(redis, key, owner_token)
     except Exception as exc:
         logger.debug(
             "failed_releasing_scenario_stars_reservation",
@@ -192,17 +292,18 @@ async def release_scenario_stars_reservation(
             stars_count=stars_count,
             error=str(exc),
         )
+        return False
 
 
 async def release_all_scenario_stars_reservations() -> int:
-    """Release all reserved stars count keys across all scenarios."""
+    """Release all reserved stars count keys across all scenarios using scan_iter."""
     try:
         redis = get_redis()
-        keys = await redis.keys("lock:scenario_stars:*")
-        if keys:
-            deleted = await redis.delete(*keys)
-            return int(deleted)
-        return 0
+        deleted = 0
+        async for key in redis.scan_iter("lock:scenario_stars:*", count=100):
+            await redis.delete(key)
+            deleted += 1
+        return deleted
     except Exception as exc:
         logger.warning(
             "failed_releasing_all_scenario_stars_reservations", error=str(exc)
@@ -217,40 +318,45 @@ def _scenario_pending_lock_key(scenario_id: str, account_id: UUID | str) -> str:
 async def acquire_scenario_pending_lock(
     scenario_id: str,
     account_id: UUID | str,
+    owner_token: str | None = None,
     ttl_seconds: int = 1800,  # 30 minutes
-) -> bool:
+) -> str | None:
     """
     Atomically acquire a pending order reservation for a scenario on a specific account.
     Used for scenarios (like starslly_bot) that do not provide order IDs in confirmation
     messages, ensuring at most 1 pending order exists per account.
+    Returns owner token if acquired, or None if occupied or failed.
     """
+    token = owner_token or str(uuid6.uuid7())
     try:
         redis = get_redis()
         res = await redis.set(
             _scenario_pending_lock_key(scenario_id, account_id),
-            "1",
+            token,
             nx=True,
             ex=ttl_seconds,
         )
-        return bool(res)
+        return token if res else None
     except Exception as exc:
-        logger.warning(
+        logger.error(
             "failed_acquiring_scenario_pending_lock",
             scenario_id=scenario_id,
             account_id=str(account_id),
             error=str(exc),
         )
-        return True
+        return None
 
 
 async def release_scenario_pending_lock(
     scenario_id: str,
     account_id: UUID | str,
-) -> None:
+    owner_token: str | None = None,
+) -> bool:
     """Release pending reservation for a scenario on an account."""
     try:
         redis = get_redis()
-        await redis.delete(_scenario_pending_lock_key(scenario_id, account_id))
+        key = _scenario_pending_lock_key(scenario_id, account_id)
+        return await _eval_release_lock(redis, key, owner_token)
     except Exception as exc:
         logger.debug(
             "failed_releasing_scenario_pending_lock",
@@ -258,6 +364,7 @@ async def release_scenario_pending_lock(
             account_id=str(account_id),
             error=str(exc),
         )
+        return False
 
 
 async def is_scenario_pending_locked(
@@ -274,14 +381,14 @@ async def is_scenario_pending_locked(
 
 
 async def release_all_scenario_pending_locks() -> int:
-    """Release all pending scenario lock keys across all accounts."""
+    """Release all pending scenario lock keys across all accounts using scan_iter."""
     try:
         redis = get_redis()
-        keys = await redis.keys("lock:scenario_pending:*")
-        if keys:
-            deleted = await redis.delete(*keys)
-            return int(deleted)
-        return 0
+        deleted = 0
+        async for key in redis.scan_iter("lock:scenario_pending:*", count=100):
+            await redis.delete(key)
+            deleted += 1
+        return deleted
     except Exception as exc:
         logger.warning("failed_releasing_all_scenario_pending_locks", error=str(exc))
         return 0

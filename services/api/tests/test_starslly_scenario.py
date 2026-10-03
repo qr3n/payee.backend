@@ -7,6 +7,7 @@ from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 
+from app.core.exceptions import AppException
 from app.modules.accounts.models import AccountStatus, TelegramAccount
 from app.modules.payments.scenarios.base import ScenarioContext
 from app.modules.payments.scenarios.bot_dialog_helper import (
@@ -29,12 +30,23 @@ def test_calculate_stars_from_amount() -> None:
     assert calculate_stars_from_amount(Decimal("300")) == 300
     assert calculate_stars_from_amount(Decimal("1500.50")) == 1500
 
-    # Min clamp (50)
-    assert calculate_stars_from_amount(Decimal("10")) == 50
-    assert calculate_stars_from_amount(Decimal("0")) == 50
+    # Min boundary (< 50) raises AppException
+    with pytest.raises(AppException) as exc_min:
+        calculate_stars_from_amount(Decimal("10"))
+    assert exc_min.value.code == "AMOUNT_OUT_OF_RANGE"
 
-    # Max clamp (30000)
-    assert calculate_stars_from_amount(Decimal("50000")) == 30000
+    with pytest.raises(AppException) as exc_zero:
+        calculate_stars_from_amount(Decimal("0"))
+    assert exc_zero.value.code == "INVALID_AMOUNT"
+
+    # Max boundary (> 30000) raises AppException
+    with pytest.raises(AppException) as exc_max:
+        calculate_stars_from_amount(Decimal("50000"))
+    assert exc_max.value.code == "AMOUNT_OUT_OF_RANGE"
+
+    # Valid boundaries
+    assert calculate_stars_from_amount(Decimal("50")) == 50
+    assert calculate_stars_from_amount(Decimal("30000")) == 30000
 
     # Custom rate
     assert calculate_stars_from_amount(Decimal("100"), rate=2.0) == 200

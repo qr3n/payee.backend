@@ -11,7 +11,7 @@ from app.modules.payments.resolvers.cardlink import CardlinkSBPResolver
 logger = get_logger(__name__)
 
 
-async def resolve_sbp_link(url: str, timeout: float = 15.0) -> tuple[str, bool]:
+async def resolve_sbp_link(url: str, timeout: float = 25.0) -> tuple[str, bool]:
     """
     Attempt to extract a clean, direct SBP link (e.g. https://qr.nspk.ru/...)
     from supported payment gateway links (Antilopay, Cardlink).

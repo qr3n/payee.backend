@@ -111,7 +111,10 @@ async def test_antilopay_resolve_failure_returns_none() -> None:
     mock_get_resp = AsyncMock()
     mock_get_resp.status_code = 500
 
-    with patch("httpx.AsyncClient.get", new=AsyncMock(return_value=mock_get_resp)):
+    with (
+        patch("asyncio.sleep", new=AsyncMock()),
+        patch("httpx.AsyncClient.get", new=AsyncMock(return_value=mock_get_resp)),
+    ):
         result = await AntilopaySBPResolver.resolve(test_url)
         assert result is None
 
@@ -119,6 +122,97 @@ async def test_antilopay_resolve_failure_returns_none() -> None:
         link, is_clean = await resolve_sbp_link(test_url)
         assert link == test_url
         assert is_clean is False
+
+
+@pytest.mark.asyncio
+async def test_antilopay_resolve_retry_via_recheck() -> None:
+    """
+    Test when initial POST /perform returns 200 without qrcId (awaiting=None),
+    but the subsequent re-check of GET /payment finds qrcId populated by the bank.
+    """
+    test_url = "https://gate.antilopay.com/payment/APAY12345"
+
+    # 1. Initial GET /payment has no qrcId
+    mock_initial_get = AsyncMock()
+    mock_initial_get.status_code = 200
+    mock_initial_get.json = MagicMock(
+        return_value={
+            "status": "PENDING",
+            "provideMethod": "SBP",
+            "qrcId": None,
+            "sessionUserId": "mock_suid_123",
+        }
+    )
+
+    # 2. Recheck GET /payment has qrcId populated
+    mock_recheck_get = AsyncMock()
+    mock_recheck_get.status_code = 200
+    mock_recheck_get.json = MagicMock(
+        return_value={
+            "status": "PENDING",
+            "provideMethod": "SBP",
+            "qrcId": "AD10107RECHECK999",
+        }
+    )
+
+    get_side_effects = [mock_initial_get, mock_recheck_get]
+
+    # POST /perform returns 200 with awaiting=None and no qrcId
+    mock_post_resp = AsyncMock()
+    mock_post_resp.status_code = 200
+    mock_post_resp.json = MagicMock(
+        return_value={
+            "awaiting": None,
+            "url": None,
+        }
+    )
+
+    with (
+        patch("asyncio.sleep", new=AsyncMock()),
+        patch("httpx.AsyncClient.get", new=AsyncMock(side_effect=get_side_effects)),
+        patch("httpx.AsyncClient.post", new=AsyncMock(return_value=mock_post_resp)),
+    ):
+        result = await AntilopaySBPResolver.resolve(test_url)
+        assert result == "https://qr.nspk.ru/AD10107RECHECK999"
+
+
+@pytest.mark.asyncio
+async def test_antilopay_resolve_retry_via_second_perform() -> None:
+    """Test when attempt 1 perform fails/times out, but attempt 2 perform succeeds."""
+    test_url = "https://gate.antilopay.com/payment/APAY12345"
+
+    mock_get = AsyncMock()
+    mock_get.status_code = 200
+    mock_get.json = MagicMock(
+        return_value={
+            "status": "PENDING",
+            "provideMethod": "SBP",
+            "qrcId": None,
+        }
+    )
+
+    mock_post_1 = AsyncMock()
+    mock_post_1.status_code = 200
+    mock_post_1.json = MagicMock(return_value={"error": "Gateway busy"})
+
+    mock_post_2 = AsyncMock()
+    mock_post_2.status_code = 200
+    mock_post_2.json = MagicMock(
+        return_value={
+            "awaiting": True,
+            "qrcId": "BD1010SECOND999",
+        }
+    )
+
+    post_side_effects = [mock_post_1, mock_post_2]
+
+    with (
+        patch("asyncio.sleep", new=AsyncMock()),
+        patch("httpx.AsyncClient.get", new=AsyncMock(return_value=mock_get)),
+        patch("httpx.AsyncClient.post", new=AsyncMock(side_effect=post_side_effects)),
+    ):
+        result = await AntilopaySBPResolver.resolve(test_url)
+        assert result == "https://qr.nspk.ru/BD1010SECOND999"
 
 
 @pytest.mark.asyncio

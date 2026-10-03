@@ -49,6 +49,7 @@ class PooledSession:
     session_string: str
     last_used: float
     lock: asyncio.Lock
+    listener_registered: bool = False
 
 
 class TelegramSessionPool:
@@ -87,6 +88,7 @@ class TelegramSessionPool:
                     session_string=account.session_string,
                     last_used=asyncio.get_running_loop().time(),
                     lock=asyncio.Lock(),
+                    listener_registered=False,
                 )
                 self._sessions[account.id] = pooled
                 if self._auto_cleanup:
@@ -102,6 +104,7 @@ class TelegramSessionPool:
                     logger.debug("Failed disconnecting outdated client", error=str(e))
                 pooled.client = create_telethon_client(account)
                 pooled.session_string = account.session_string
+                pooled.listener_registered = False
 
             if not pooled.client.is_connected():
                 logger.info(
@@ -124,6 +127,60 @@ class TelegramSessionPool:
                     code="ACCOUNT_UNAUTHORIZED",
                     status_code=500,
                 )
+
+            # Register incoming payment notification listener if not registered
+            if not pooled.listener_registered:
+                from telethon import events
+
+                acc_id = account.id
+
+                async def _on_new_message(event: events.NewMessage.Event) -> None:
+                    try:
+                        sender = await event.get_sender()
+                        sender_username = getattr(sender, "username", None) or ""
+                        text = getattr(event, "raw_text", "") or ""
+                        if not sender_username or not text:
+                            return
+
+                        from app.core.db import async_session_maker
+                        from app.modules.payments.notifications import (
+                            process_bot_notification,
+                        )
+
+                        async with async_session_maker() as db:
+                            try:
+                                updated = await process_bot_notification(
+                                    session=db,
+                                    account_id=acc_id,
+                                    sender_username=sender_username,
+                                    message_text=text,
+                                )
+                                if updated:
+                                    await db.commit()
+                            except Exception as e:
+                                await db.rollback()
+                                logger.error(
+                                    "error_processing_bot_payment_notification",
+                                    error=str(e),
+                                )
+                    except Exception as exc:
+                        logger.debug("error_in_bot_message_listener", error=str(exc))
+
+                try:
+                    import inspect
+
+                    res = pooled.client.add_event_handler(
+                        _on_new_message, events.NewMessage(incoming=True)
+                    )
+                    if inspect.isawaitable(res):
+                        await res
+                    pooled.listener_registered = True
+                except Exception as reg_err:
+                    logger.debug(
+                        "failed_registering_pool_message_listener",
+                        account_id=str(account.id),
+                        error=str(reg_err),
+                    )
 
             pooled.last_used = asyncio.get_running_loop().time()
             return pooled.client
@@ -155,6 +212,7 @@ class TelegramSessionPool:
     async def evict_idle_sessions(self) -> int:
         """
         Evict sessions idle longer than idle_ttl.
+        Preserves sessions that currently hold active PENDING payments.
         Returns count of evicted accounts.
         """
         now = asyncio.get_running_loop().time()
@@ -165,11 +223,36 @@ class TelegramSessionPool:
                 if (now - pooled.last_used) >= self.idle_ttl:
                     to_evict.append(acc_id)
 
-        for acc_id in to_evict:
+        filtered_to_evict: list[UUID] = []
+        try:
+            from sqlmodel import select
+
+            from app.core.db import async_session_maker
+            from app.modules.payments.models import Payment, PaymentStatus
+
+            async with async_session_maker() as db:
+                for acc_id in to_evict:
+                    stmt = (
+                        select(Payment.id)
+                        .where(
+                            Payment.account_id == acc_id,
+                            Payment.status == PaymentStatus.PENDING,
+                        )
+                        .limit(1)
+                    )
+                    res = await db.exec(stmt)
+                    if res.first():
+                        await self.touch(acc_id)
+                    else:
+                        filtered_to_evict.append(acc_id)
+        except Exception:
+            filtered_to_evict = to_evict
+
+        for acc_id in filtered_to_evict:
             logger.info("session_pool_evicting_idle", account_id=str(acc_id))
             await self.close_account(acc_id)
 
-        return len(to_evict)
+        return len(filtered_to_evict)
 
     async def close_all(self) -> None:
         """Gracefully disconnect all pooled sessions during app shutdown."""

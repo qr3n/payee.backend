@@ -57,6 +57,7 @@ async def _periodic_background_runner() -> None:
             try:
                 from app.modules.accounts.tasks import check_all_accounts_task
                 from app.modules.payments.tasks import (
+                    check_pending_bot_notifications_task,
                     expire_overdue_payments_task,
                     refresh_idle_account_scenarios_task,
                 )
@@ -64,6 +65,7 @@ async def _periodic_background_runner() -> None:
                 await check_all_accounts_task.kiq()
                 await expire_overdue_payments_task.kiq()
                 await refresh_idle_account_scenarios_task.kiq()
+                await check_pending_bot_notifications_task.kiq()
             except Exception as task_err:
                 logger.error(
                     "Failed dispatching periodic background tasks", error=str(task_err)

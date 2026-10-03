@@ -143,3 +143,25 @@ async def dispatch_single_scenario_warmup(
             scenario_id=scenario_id,
             error=str(exc),
         )
+
+
+@broker.task(task_name="payments:check_pending_bot_notifications")
+async def check_pending_bot_notifications_task(
+    db: AsyncSession = TaskiqDepends(get_db),
+) -> dict[str, int]:
+    """
+    Fallback background check for pending payments: queries recent messages
+    from scenario bots for all accounts that currently have pending payments.
+    """
+    from app.modules.payments.notifications import (
+        check_all_pending_payments_notifications,
+    )
+
+    logger.debug("Executing fallback pending bot notifications check")
+    confirmed_count = await check_all_pending_payments_notifications(session=db)
+    if confirmed_count > 0:
+        logger.info(
+            "Confirmed pending payments via fallback check",
+            count=confirmed_count,
+        )
+    return {"confirmed_count": confirmed_count}

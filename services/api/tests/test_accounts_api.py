@@ -28,7 +28,7 @@ async def test_create_account_api_success(client: AsyncClient) -> None:
     data = response.json()
     assert data["title"] == "API Test Account"
     assert data["phone"] == "+79998887766"
-    assert data["proxy_url"] == "socks5://proxyuser:proxypass@10.0.0.1:1080"
+    assert data["proxy_url"] == "socks5://proxyuser:***@10.0.0.1:1080"
     # Verify auto-generation of device info
     assert data["device_model"] != ""
     assert data["system_version"] != ""

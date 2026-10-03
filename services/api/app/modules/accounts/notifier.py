@@ -3,6 +3,7 @@ Admin notification service for Telegram account status changes and anomalies.
 Sends rich HTML alerts to administrators via Telegram Bot API.
 """
 
+import html
 from contextlib import suppress
 from datetime import UTC, datetime
 
@@ -25,15 +26,16 @@ def format_account_alert(
 ) -> str:
     """Format an informative HTML alert for Telegram administrators."""
     now_str = datetime.now(UTC).strftime("%Y-%m-%d %H:%M:%S UTC")
-    phone_display = account.phone or "без номера"
+    phone_display = html.escape(account.phone or "без номера")
+    title_display = html.escape(account.title)
     tg_id_display = str(account.telegram_user_id) if account.telegram_user_id else "—"
-    username_display = f"@{account.username}" if account.username else "—"
-    err_display = error or account.last_error or "Причина не указана"
+    username_display = f"@{html.escape(account.username)}" if account.username else "—"
+    err_display = html.escape(error or account.last_error or "Причина не указана")
 
     if new_status == AccountStatus.REVOKED:
         return (
             "🚨 <b>Внимание: Telegram-сессия отозвана!</b>\n\n"
-            f"📱 <b>Аккаунт:</b> {account.title} (<code>{phone_display}</code>)\n"
+            f"📱 <b>Аккаунт:</b> {title_display} (<code>{phone_display}</code>)\n"
             f"🆔 <b>ID в системе:</b> <code>{account.id}</code>\n"
             f"👤 <b>TG ID:</b> {tg_id_display} ({username_display})\n"
             f"⚠️ <b>Статус:</b> 🔴 <b>Отозвана (REVOKED)</b>\n"
@@ -206,12 +208,13 @@ async def notify_status_change_if_needed(
     if new_status == AccountStatus.ACTIVE:
         if last_alerted_status and last_alerted_status != AccountStatus.ACTIVE.value:
             text = format_account_alert(account, old_status, new_status, error)
+            sent = 0
             if text:
-                await send_admin_notification(text)
-            if redis is not None:
+                sent = await send_admin_notification(text)
+            if (sent > 0 or not text) and redis is not None:
                 with suppress(Exception):
                     await redis.delete(state_key)
-            return True
+            return sent > 0
         return False
 
     # Issue detected: REVOKED, BANNED, FLOOD_WAIT, ERROR
@@ -226,13 +229,14 @@ async def notify_status_change_if_needed(
             return False
 
         text = format_account_alert(account, old_status, new_status, error)
+        sent = 0
         if text:
-            await send_admin_notification(text)
+            sent = await send_admin_notification(text)
 
-        if redis is not None:
+        if sent > 0 and redis is not None:
             with suppress(Exception):
                 # Keep alert state for 7 days
                 await redis.set(state_key, new_status.value, ex=7 * 86400)
-        return True
+        return sent > 0
 
     return False

@@ -65,12 +65,22 @@ async def http_exception_handler(
 async def validation_exception_handler(
     _request: Request, exc: RequestValidationError
 ) -> JSONResponse:
-    """Handle Pydantic request validation errors."""
+    """Handle Pydantic request validation errors without leaking sensitive raw input."""
+    raw_errors = jsonable_encoder(exc.errors())
+    sanitized_errors = []
+    for err in raw_errors:
+        if isinstance(err, dict):
+            cleaned = dict(err)
+            cleaned.pop("input", None)
+            sanitized_errors.append(cleaned)
+        else:
+            sanitized_errors.append(err)
+
     return _build_error_response(
         status_code=status.HTTP_422_UNPROCESSABLE_CONTENT,
         code="VALIDATION_ERROR",
         message="Request payload or parameters validation failed.",
-        details=jsonable_encoder(exc.errors()),
+        details=sanitized_errors,
     )
 
 

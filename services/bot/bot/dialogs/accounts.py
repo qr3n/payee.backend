@@ -1,4 +1,5 @@
 import base64
+from contextlib import suppress
 from typing import Any
 
 from aiogram.enums import ContentType
@@ -341,6 +342,9 @@ async def on_code_entered(
     phone = dialog_manager.dialog_data.get("auth_phone")
     api_client: ApiClient = dialog_manager.middleware_data["api_client"]
 
+    with suppress(Exception):
+        await message.delete()
+
     try:
         res = await api_client.sign_in_phone(
             phone_code_hash=phone_code_hash,
@@ -351,6 +355,8 @@ async def on_code_entered(
             await dialog_manager.switch_to(AccountsSG.enter_2fa_password)
             return
 
+        dialog_manager.dialog_data.pop("auth_phone_code_hash", None)
+        dialog_manager.dialog_data.pop("auth_phone", None)
         dialog_manager.dialog_data["last_action_msg"] = (
             f"✅ {res.message or 'Аккаунт успешно добавлен!'}\n"
             "<i>⚡️ В фоне запущена подготовка для всех сценариев.</i>"
@@ -369,10 +375,14 @@ async def on_2fa_entered(
     text: str,
 ) -> None:
     """Step 3: Submit 2FA password."""
-    password = text.strip()
+    # Do NOT strip password — leading/trailing whitespace can be intentional
+    password = text
     phone_code_hash = dialog_manager.dialog_data.get("auth_phone_code_hash", "")
     phone = dialog_manager.dialog_data.get("auth_phone")
     api_client: ApiClient = dialog_manager.middleware_data["api_client"]
+
+    with suppress(Exception):
+        await message.delete()
 
     try:
         res = await api_client.sign_in_phone(
@@ -381,6 +391,8 @@ async def on_2fa_entered(
             phone=phone,
             two_fa_password=password,
         )
+        dialog_manager.dialog_data.pop("auth_phone_code_hash", None)
+        dialog_manager.dialog_data.pop("auth_phone", None)
         dialog_manager.dialog_data["last_action_msg"] = (
             f"✅ {res.message or 'Аккаунт успешно добавлен с 2FA!'}\n"
             "<i>⚡️ В фоне запущена подготовка для всех сценариев.</i>"

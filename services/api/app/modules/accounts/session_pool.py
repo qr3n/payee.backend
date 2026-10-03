@@ -43,10 +43,25 @@ def create_telethon_client(account: TelegramAccount) -> TelegramClient:
     )
 
 
+def compute_account_fingerprint(account: TelegramAccount) -> str:
+    """
+    Generate SHA256 fingerprint of all connection-affecting properties of the account.
+    """
+    import hashlib
+
+    raw = (
+        f"{account.session_string}|{account.proxy_url}|{account.api_id}|"
+        f"{account.api_hash}|{account.device_model}|{account.system_version}|"
+        f"{account.app_version}|{account.system_lang_code}|{account.lang_code}"
+    )
+    return hashlib.sha256(raw.encode()).hexdigest()
+
+
 @dataclass
 class PooledSession:
     client: TelegramClient
     session_string: str
+    config_fingerprint: str
     last_used: float
     lock: asyncio.Lock
     listener_registered: bool = False
@@ -79,6 +94,7 @@ class TelegramSessionPool:
         Reuses an existing open connection when available, eliminating
         TCP connect and MTProto authorization round-trip delays.
         """
+        fp = compute_account_fingerprint(account)
         async with self._pool_lock:
             pooled = self._sessions.get(account.id)
             if pooled is None:
@@ -86,6 +102,7 @@ class TelegramSessionPool:
                 pooled = PooledSession(
                     client=client,
                     session_string=account.session_string,
+                    config_fingerprint=fp,
                     last_used=asyncio.get_running_loop().time(),
                     lock=asyncio.Lock(),
                     listener_registered=False,
@@ -95,8 +112,8 @@ class TelegramSessionPool:
                     self._ensure_cleanup_task()
 
         async with pooled.lock:
-            # Recreate client if session string changed
-            if pooled.session_string != account.session_string:
+            # Recreate client if session string or connection configuration changed
+            if pooled.config_fingerprint != fp:
                 try:
                     if pooled.client.is_connected():
                         await pooled.client.disconnect()
@@ -104,6 +121,7 @@ class TelegramSessionPool:
                     logger.debug("Failed disconnecting outdated client", error=str(e))
                 pooled.client = create_telethon_client(account)
                 pooled.session_string = account.session_string
+                pooled.config_fingerprint = fp
                 pooled.listener_registered = False
 
             if not pooled.client.is_connected():

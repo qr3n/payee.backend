@@ -3,13 +3,14 @@ Pydantic DTO schemas for Telegram account management.
 """
 
 from datetime import datetime
+from typing import Any
 from uuid import UUID
 
 from pydantic import BaseModel, Field, field_validator
 from sqlmodel import SQLModel
 
 from app.modules.accounts.models import AccountStatus
-from app.modules.accounts.proxy_utils import parse_proxy_url
+from app.modules.accounts.proxy_utils import mask_proxy_url, parse_proxy_url
 
 
 class TelegramAccountBaseSchema(SQLModel):
@@ -161,6 +162,13 @@ class TelegramAccountUpdate(SQLModel):
         description="Replace StringSession string",
     )
 
+    @field_validator("title", "lang_code", "status", "session_string", mode="before")
+    @classmethod
+    def validate_non_nullable(cls, v: Any, info: Any) -> Any:
+        if v is None:
+            raise ValueError(f"Field '{info.field_name}' cannot be null.")
+        return v
+
     @field_validator("proxy_url")
     @classmethod
     def validate_proxy(cls, v: str | None) -> str | None:
@@ -193,6 +201,11 @@ class TelegramAccountRead(SQLModel):
     last_error: str | None = Field(description="Last error description")
     created_at: datetime = Field(description="Creation timestamp")
     updated_at: datetime = Field(description="Last update timestamp")
+
+    @field_validator("proxy_url", mode="before")
+    @classmethod
+    def mask_proxy(cls, v: str | None) -> str | None:
+        return mask_proxy_url(v)
 
 
 class TelegramAccountCheckResponse(BaseModel):

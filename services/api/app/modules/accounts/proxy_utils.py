@@ -46,3 +46,19 @@ def parse_proxy_url(proxy_url: str | None) -> dict[str, Any] | None:
         proxy_dict["rdns"] = True
 
     return proxy_dict
+
+
+def mask_proxy_url(proxy_url: str | None) -> str | None:
+    """Mask credentials in a proxy URL for safe display and serialization."""
+    if not proxy_url or not proxy_url.strip():
+        return proxy_url
+
+    try:
+        parsed = urlparse(proxy_url.strip())
+        if parsed.password:
+            port_str = f":{parsed.port}" if parsed.port else ""
+            netloc = f"{parsed.username or ''}:***@{parsed.hostname}{port_str}"
+            return parsed._replace(netloc=netloc).geturl()
+        return proxy_url
+    except Exception:
+        return proxy_url

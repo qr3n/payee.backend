@@ -147,7 +147,8 @@ async def test_notify_status_change_deduplication() -> None:
     with (
         patch("app.modules.accounts.notifier.get_redis", return_value=mock_redis),
         patch(
-            "app.modules.accounts.notifier.send_admin_notification", new=AsyncMock()
+            "app.modules.accounts.notifier.send_admin_notification",
+            new=AsyncMock(return_value=1),
         ) as mock_send,
     ):
         # 1. First alert on REVOKED -> should notify

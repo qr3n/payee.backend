@@ -1,6 +1,7 @@
 """
 Scenario implementation for @HelperStars_Robot (Telegram Stars purchase via СБП).
-Executes fast automated MTProto flow to generate invoice payment link.
+Executes complete automated MTProto flow to generate invoice payment link,
+supporting two-phase execution (pre-warmed fast-path with graceful full-path fallback).
 """
 
 from telethon import TelegramClient
@@ -26,6 +27,11 @@ from app.modules.payments.scenarios.stage_timer import StageTimer
 from app.modules.payments.scenarios.stars_calculator import (
     calculate_stars_from_amount,
 )
+from app.modules.payments.scenarios.state import (
+    clear_scenario_prepared,
+    is_scenario_prepared,
+    set_scenario_prepared,
+)
 
 logger = get_logger(__name__)
 
@@ -34,15 +40,14 @@ class HelperStarsBotScenario(BasePaymentScenario):
     """
     Automated purchase scenario for @HelperStars_Robot.
     Flow:
-    1. /start -> language selection ("Русский") if prompted.
-    2. Channel subscription check ("HelperStars_Rezerv") if prompted.
-    3. Main menu -> Click "Купить звёзды" (1st click).
-    4. Submenu -> Click "Купить звёзды" (2nd click).
-    5. Send target recipient username.
-    6. Send calculated stars count.
-    7. Click "Оплатить" in formed bill message.
-    8. Select "СБП" from payment methods.
-    9. Extract and return invoice 'Оплатить' URL.
+    1. /start -> handle language selection & channel subscription if prompted.
+    2. Click 'Купить звёзды' in main menu.
+    3. Click 'Купить звёзды' in category menu.
+    4. Send target recipient username (@username).
+    5. Send calculated stars count.
+    6. Click 'Подтвердить' creation of bill.
+    7. Select 'СБП' payment method.
+    8. Extract and return invoice URL from button.
     """
 
     scenario_id = "helperstars_bot"
@@ -82,213 +87,49 @@ class HelperStarsBotScenario(BasePaymentScenario):
             client = await telegram_session_pool.get_connected_client(ctx.account)
             timer.record_stage("connect_session", "Подключение сессии из пула")
 
-            # Step 1: Send /start
-            logger.info("helperstars_step_1_sending_start", bot=bot_username)
-            start_msg = await client.send_message(bot_username, "/start")
+            # Check if chat is pre-warmed / waiting for amount
+            is_prep = await is_scenario_prepared(ctx.account.id, self.scenario_id)
+            if is_prep:
+                try:
+                    logger.info(
+                        "helperstars_attempting_fast_path",
+                        account_id=str(ctx.account.id),
+                        stars_count=stars_count,
+                    )
+                    res = await self._create_payment_fast(
+                        client=client,
+                        ctx=ctx,
+                        timer=timer,
+                        bot_username=bot_username,
+                        recipient=recipient,
+                        stars_count=stars_count,
+                    )
+                    await clear_scenario_prepared(ctx.account.id, self.scenario_id)
+                    return res
+                except Exception as exc:
+                    logger.warning(
+                        "helperstars_fast_path_failed_falling_back",
+                        account_id=str(ctx.account.id),
+                        error=str(exc),
+                    )
+                    timer.record_stage(
+                        "fast_path_fallback",
+                        "Сессия в боте устарела — переход на полный цикл",
+                    )
+                    await clear_scenario_prepared(ctx.account.id, self.scenario_id)
 
-            # Check bot response: could be language selection, channel sub, or main menu
-            first_reply = await wait_for_bot_message(
+            # Full path
+            res = await self._create_payment_full(
                 client=client,
-                peer=bot_username,
-                predicate=lambda m: (
-                    find_button_by_text(m, "русский") is not None
-                    or find_button_by_text(m, "купить звёзды") is not None
-                    or "подписаться" in (getattr(m, "text", "") or "").lower()
-                    or "текущий баланс" in (getattr(m, "text", "") or "").lower()
-                ),
-                timeout=15.0,
-                min_id=start_msg.id,
-            )
-            timer.record_stage("send_start", "Команда /start и ответ бота")
-
-            # 1a. Handle language selection if prompted
-            btn_lang = find_button_by_text(first_reply, "русский")
-            if btn_lang:
-                logger.info("helperstars_step_1a_select_language")
-                await click_button_fast(client, btn_lang)
-                next_msg = await wait_for_bot_message(
-                    client=client,
-                    peer=bot_username,
-                    predicate=lambda m: (
-                        find_button_by_text(m, "купить звёзды") is not None
-                        or "подписаться" in (getattr(m, "text", "") or "").lower()
-                        or "текущий баланс" in (getattr(m, "text", "") or "").lower()
-                    ),
-                    timeout=15.0,
-                )
-                timer.record_stage("select_language", "Выбор языка (Русский)")
-            else:
-                next_msg = first_reply
-
-            # 1b. Handle channel subscription if prompted
-            if "подписаться" in (getattr(next_msg, "text", "") or "").lower():
-                logger.info(
-                    "helperstars_step_1b_channel_sub_required",
-                    channel=channel_username,
-                )
-                await join_channel_safely(client, channel_username)
-                main_menu = await wait_for_bot_message(
-                    client=client,
-                    peer=bot_username,
-                    predicate=lambda m: (
-                        find_button_by_text(m, "купить звёзды") is not None
-                        or "текущий баланс" in (getattr(m, "text", "") or "").lower()
-                    ),
-                    timeout=15.0,
-                )
-                timer.record_stage("verify_channel", "Подписка на канал")
-            else:
-                main_menu = next_msg
-
-            # Step 2: Main menu -> click "Купить звёзды" (1st click)
-            btn_buy_1 = find_button_by_text(main_menu, "купить звёзды")
-            if not btn_buy_1:
-                raise AppException(
-                    message="Could not find 'Купить звёзды' button in main menu.",
-                    code="BOT_INTERACTION_ERROR",
-                    status_code=502,
-                )
-            logger.info("helperstars_step_2_click_buy_stars_1")
-            await click_button_fast(client, btn_buy_1)
-
-            # Step 3: Submenu -> click "Купить звёзды" (2nd click)
-            submenu_msg = await wait_for_bot_message(
-                client=client,
-                peer=bot_username,
-                predicate=lambda m: (
-                    "выберите, что именно" in (getattr(m, "text", "") or "").lower()
-                    or find_button_by_text(m, "купить звёзды") is not None
-                ),
-                timeout=15.0,
-            )
-            timer.record_stage("open_stars_menu", "Кнопка «Купить звёзды» (меню)")
-
-            btn_buy_2 = find_button_by_text(submenu_msg, "купить звёзды")
-            if not btn_buy_2:
-                raise AppException(
-                    message="Could not find 'Купить звёзды' in category submenu.",
-                    code="BOT_INTERACTION_ERROR",
-                    status_code=502,
-                )
-            logger.info("helperstars_step_3_click_buy_stars_2")
-            await click_button_fast(client, btn_buy_2)
-
-            # Step 4: Wait for username prompt & send recipient username
-            await wait_for_bot_message(
-                client=client,
-                peer=bot_username,
-                predicate=lambda m: (
-                    "юзернейм" in (getattr(m, "text", "") or "").lower()
-                    or "пользователя" in (getattr(m, "text", "") or "").lower()
-                ),
-                timeout=15.0,
-            )
-            timer.record_stage(
-                "confirm_stars_category", "Подтверждение «Купить звёзды»"
-            )
-
-            logger.info("helperstars_step_4_sending_recipient", recipient=recipient)
-            send_user_msg = await client.send_message(bot_username, recipient)
-
-            # Step 5: Wait for stars count prompt & send calculated stars
-            await wait_for_bot_message(
-                client=client,
-                peer=bot_username,
-                predicate=lambda m: (
-                    "количество звёзд" in (getattr(m, "text", "") or "").lower()
-                    or "минимум" in (getattr(m, "text", "") or "").lower()
-                ),
-                timeout=15.0,
-                min_id=send_user_msg.id,
-            )
-            timer.record_stage("send_recipient", f"Ввод получателя ({recipient})")
-
-            logger.info(
-                "helperstars_step_5_sending_stars_count",
+                ctx=ctx,
+                timer=timer,
+                bot_username=bot_username,
+                channel_username=channel_username,
+                recipient=recipient,
                 stars_count=stars_count,
             )
-            send_stars_msg = await client.send_message(bot_username, str(stars_count))
-
-            # Step 6: Wait for bill formed message & click 'Оплатить'
-            bill_msg = await wait_for_bot_message(
-                client=client,
-                peer=bot_username,
-                predicate=lambda m: (
-                    find_button_by_text(m, "оплатить") is not None
-                    or "счёт сформирован" in (getattr(m, "text", "") or "").lower()
-                ),
-                timeout=15.0,
-                min_id=send_stars_msg.id,
-            )
-            timer.record_stage("send_stars_count", f"Ввод суммы ({stars_count} звёзд)")
-
-            btn_confirm_pay = find_button_by_text(bill_msg, "оплатить")
-            if not btn_confirm_pay:
-                raise AppException(
-                    message="Could not find 'Оплатить' button in formed bill.",
-                    code="BOT_INTERACTION_ERROR",
-                    status_code=502,
-                )
-            logger.info("helperstars_step_6_click_confirm_pay")
-            await click_button_fast(client, btn_confirm_pay)
-
-            # Step 7: Wait for insufficient funds / payment methods & click 'СБП'
-            methods_msg = await wait_for_bot_message(
-                client=client,
-                peer=bot_username,
-                predicate=lambda m: (
-                    find_button_by_text(m, "сбп") is not None
-                    or "способ оплаты" in (getattr(m, "text", "") or "").lower()
-                ),
-                timeout=15.0,
-            )
-            timer.record_stage("confirm_bill", "Нажатие «Оплатить» на счете")
-
-            btn_sbp = find_button_by_text(methods_msg, "сбп")
-            if not btn_sbp:
-                raise AppException(
-                    message="Could not find 'СБП' payment button.",
-                    code="BOT_INTERACTION_ERROR",
-                    status_code=502,
-                )
-            logger.info("helperstars_step_7_click_sbp")
-            await click_button_fast(client, btn_sbp)
-
-            # Step 8: Wait for invoice generated message with link button
-            invoice_msg = await wait_for_bot_message(
-                client=client,
-                peer=bot_username,
-                predicate=lambda m: find_url_button(m) is not None,
-                timeout=20.0,
-            )
-            timer.record_stage("select_sbp_method", "Выбор способа оплаты СБП")
-
-            url_button_info = find_url_button(invoice_msg)
-            if not url_button_info:
-                raise AppException(
-                    message="Invoice message received without payment link button.",
-                    code="BOT_INTERACTION_ERROR",
-                    status_code=502,
-                )
-
-            _, payment_link = url_button_info
-            logger.info(
-                "helperstars_step_8_invoice_link_extracted",
-                payment_link=payment_link,
-            )
-            timer.record_stage("extract_payment_link", "Получение ссылки на оплату")
-
-            return ScenarioResult(
-                payment_link=payment_link,
-                meta={
-                    "stars_count": stars_count,
-                    "recipient_username": recipient,
-                    "bot_username": bot_username,
-                    "payment_method": "СБП",
-                    "stage_timings": timer.stages,
-                    "scenario_duration_sec": timer.total_duration_sec,
-                },
-            )
+            await clear_scenario_prepared(ctx.account.id, self.scenario_id)
+            return res
 
         except AppException:
             raise
@@ -309,6 +150,304 @@ class HelperStarsBotScenario(BasePaymentScenario):
         finally:
             await telegram_session_pool.touch(ctx.account.id)
 
+    async def _create_payment_fast(
+        self,
+        client: TelegramClient,
+        ctx: ScenarioContext,
+        timer: StageTimer,
+        bot_username: str,
+        recipient: str,
+        stars_count: int,
+    ) -> ScenarioResult:
+        """Fast-path: bot is already waiting for stars count."""
+        _ = ctx
+        logger.info(
+            "helperstars_fast_path_sending_stars_count",
+            stars_count=stars_count,
+        )
+        send_stars_msg = await client.send_message(bot_username, str(stars_count))
+
+        bill_msg = await wait_for_bot_message(
+            client=client,
+            peer=bot_username,
+            predicate=lambda m: (
+                find_button_by_text(m, "оплатить") is not None
+                or find_button_by_text(m, "подтвердить") is not None
+                or "деталями заказа" in (getattr(m, "text", "") or "").lower()
+                or "счёт" in (getattr(m, "text", "") or "").lower()
+            ),
+            timeout=5.0,
+            min_id=send_stars_msg.id,
+        )
+        timer.record_stage(
+            "send_stars_count",
+            f"Ввод суммы ({stars_count} звёзд) [быстрый путь]",
+        )
+
+        confirm_btn = find_button_by_text(bill_msg, "оплатить") or find_button_by_text(
+            bill_msg, "подтвердить"
+        )
+        if not confirm_btn:
+            raise AppException(
+                message="Could not find payment button in formed bill.",
+                code="BOT_INTERACTION_ERROR",
+                status_code=502,
+            )
+        await click_button_fast(client, confirm_btn)
+
+        methods_msg = await wait_for_bot_message(
+            client=client,
+            peer=bot_username,
+            predicate=lambda m: (
+                find_button_by_text(m, "сбп") is not None
+                or "способ оплаты" in (getattr(m, "text", "") or "").lower()
+            ),
+            timeout=5.0,
+        )
+        timer.record_stage("confirm_bill", "Подтверждение создания счёта")
+
+        sbp_button = find_button_by_text(methods_msg, "сбп")
+        if not sbp_button:
+            raise AppException(
+                message="Could not find 'СБП' payment button in bot response.",
+                code="BOT_INTERACTION_ERROR",
+                status_code=502,
+            )
+        await click_button_fast(client, sbp_button)
+
+        invoice_msg = await wait_for_bot_message(
+            client=client,
+            peer=bot_username,
+            predicate=lambda m: find_url_button(m) is not None,
+            timeout=10.0,
+        )
+        timer.record_stage("select_sbp_method", "Выбор способа оплаты СБП")
+
+        url_button_info = find_url_button(invoice_msg)
+        if not url_button_info:
+            raise AppException(
+                message="Invoice message received without payment link button.",
+                code="BOT_INTERACTION_ERROR",
+                status_code=502,
+            )
+
+        _, payment_link = url_button_info
+        timer.record_stage("extract_payment_link", "Получение ссылки на оплату")
+
+        return ScenarioResult(
+            payment_link=payment_link,
+            meta={
+                "stars_count": stars_count,
+                "recipient_username": recipient,
+                "bot_username": bot_username,
+                "payment_method": "СБП",
+                "is_fast_path": True,
+                "stage_timings": timer.stages,
+                "scenario_duration_sec": timer.total_duration_sec,
+            },
+        )
+
+    async def _create_payment_full(
+        self,
+        client: TelegramClient,
+        ctx: ScenarioContext,
+        timer: StageTimer,
+        bot_username: str,
+        channel_username: str,
+        recipient: str,
+        stars_count: int,
+    ) -> ScenarioResult:
+        """
+        Full-path: /start -> language -> channel -> menus -> recipient
+        -> stars -> sbp -> link.
+        """
+        _ = ctx
+        logger.info("helperstars_step_1_sending_start", bot=bot_username)
+        start_msg = await client.send_message(bot_username, "/start")
+
+        first_reply = await wait_for_bot_message(
+            client=client,
+            peer=bot_username,
+            predicate=lambda m: (
+                find_button_by_text(m, "русский") is not None
+                or find_button_by_text(m, "купить звёзды") is not None
+                or "подписаться" in (getattr(m, "text", "") or "").lower()
+                or "текущий баланс" in (getattr(m, "text", "") or "").lower()
+            ),
+            timeout=15.0,
+            min_id=start_msg.id,
+        )
+        timer.record_stage("send_start", "Команда /start и ответ бота")
+
+        btn_lang = find_button_by_text(first_reply, "русский")
+        if btn_lang:
+            logger.info("helperstars_step_1a_select_language")
+            await click_button_fast(client, btn_lang)
+            next_msg = await wait_for_bot_message(
+                client=client,
+                peer=bot_username,
+                predicate=lambda m: (
+                    find_button_by_text(m, "купить звёзды") is not None
+                    or "подписаться" in (getattr(m, "text", "") or "").lower()
+                    or "текущий баланс" in (getattr(m, "text", "") or "").lower()
+                ),
+                timeout=15.0,
+            )
+            timer.record_stage("select_language", "Выбор языка (Русский)")
+        else:
+            next_msg = first_reply
+
+        btn_channel = find_button_by_text(
+            next_msg, "helperstars"
+        ) or find_button_by_text(next_msg, "подписаться")
+        if (
+            btn_channel
+            or "подписаться" in (getattr(next_msg, "text", "") or "").lower()
+        ):
+            logger.info("helperstars_step_1b_channel_sub_required")
+            await join_channel_safely(client, channel_username)
+            main_menu = await wait_for_bot_message(
+                client=client,
+                peer=bot_username,
+                predicate=lambda m: (
+                    find_button_by_text(m, "купить звёзды") is not None
+                    or "текущий баланс" in (getattr(m, "text", "") or "").lower()
+                    or "выберите действие" in (getattr(m, "text", "") or "").lower()
+                ),
+                timeout=15.0,
+            )
+            timer.record_stage("verify_channel", "Подписка на информационный канал")
+        else:
+            main_menu = next_msg
+
+        buy_stars_btn = find_button_by_text(main_menu, "купить звёзды")
+        if not buy_stars_btn:
+            raise AppException(
+                message="Could not find 'Купить звёзды' button in main menu.",
+                code="BOT_INTERACTION_ERROR",
+                status_code=502,
+            )
+        await click_button_fast(client, buy_stars_btn)
+
+        cat_menu = await wait_for_bot_message(
+            client=client,
+            peer=bot_username,
+            predicate=lambda m: (
+                find_button_by_text(m, "купить звёзды") is not None
+                or "введите юзернейм" in (getattr(m, "text", "") or "").lower()
+            ),
+            timeout=15.0,
+        )
+        timer.record_stage("open_stars_menu", "Переход в меню «Купить звёзды»")
+
+        cat_btn = find_button_by_text(cat_menu, "купить звёзды")
+        if cat_btn:
+            await click_button_fast(client, cat_btn)
+
+        await wait_for_bot_message(
+            client=client,
+            peer=bot_username,
+            predicate=lambda m: (
+                "введите юзернейм" in (getattr(m, "text", "") or "").lower()
+                or "дарить звёзды" in (getattr(m, "text", "") or "").lower()
+            ),
+            timeout=15.0,
+        )
+        timer.record_stage("confirm_stars_category", "Подтверждение категории звёзд")
+
+        send_user_msg = await client.send_message(bot_username, recipient)
+
+        await wait_for_bot_message(
+            client=client,
+            peer=bot_username,
+            predicate=lambda m: (
+                "введите количество звёзд" in (getattr(m, "text", "") or "").lower()
+                or "получатель:" in (getattr(m, "text", "") or "").lower()
+            ),
+            timeout=15.0,
+            min_id=send_user_msg.id,
+        )
+        timer.record_stage("send_recipient", f"Ввод получателя ({recipient})")
+
+        send_stars_msg = await client.send_message(bot_username, str(stars_count))
+
+        bill_msg = await wait_for_bot_message(
+            client=client,
+            peer=bot_username,
+            predicate=lambda m: (
+                find_button_by_text(m, "оплатить") is not None
+                or find_button_by_text(m, "подтвердить") is not None
+                or "деталями заказа" in (getattr(m, "text", "") or "").lower()
+                or "счёт" in (getattr(m, "text", "") or "").lower()
+            ),
+            timeout=15.0,
+            min_id=send_stars_msg.id,
+        )
+        timer.record_stage("send_stars_count", f"Ввод количества ({stars_count} звёзд)")
+
+        confirm_btn = find_button_by_text(bill_msg, "оплатить") or find_button_by_text(
+            bill_msg, "подтвердить"
+        )
+        if not confirm_btn:
+            raise AppException(
+                message="Could not find payment button in formed bill.",
+                code="BOT_INTERACTION_ERROR",
+                status_code=502,
+            )
+        await click_button_fast(client, confirm_btn)
+
+        methods_msg = await wait_for_bot_message(
+            client=client,
+            peer=bot_username,
+            predicate=lambda m: (
+                find_button_by_text(m, "сбп") is not None
+                or "способ оплаты" in (getattr(m, "text", "") or "").lower()
+            ),
+            timeout=15.0,
+        )
+        timer.record_stage("confirm_bill", "Подтверждение создания счёта")
+
+        sbp_button = find_button_by_text(methods_msg, "сбп")
+        if not sbp_button:
+            raise AppException(
+                message="Could not find 'СБП' payment button in bot response.",
+                code="BOT_INTERACTION_ERROR",
+                status_code=502,
+            )
+        await click_button_fast(client, sbp_button)
+
+        invoice_msg = await wait_for_bot_message(
+            client=client,
+            peer=bot_username,
+            predicate=lambda m: find_url_button(m) is not None,
+            timeout=20.0,
+        )
+        timer.record_stage("select_sbp_method", "Выбор способа оплаты СБП")
+
+        url_button_info = find_url_button(invoice_msg)
+        if not url_button_info:
+            raise AppException(
+                message="Invoice message received without payment link button.",
+                code="BOT_INTERACTION_ERROR",
+                status_code=502,
+            )
+
+        _, payment_link = url_button_info
+        timer.record_stage("extract_payment_link", "Получение ссылки на оплату")
+
+        return ScenarioResult(
+            payment_link=payment_link,
+            meta={
+                "stars_count": stars_count,
+                "recipient_username": recipient,
+                "bot_username": bot_username,
+                "payment_method": "СБП",
+                "is_fast_path": False,
+                "stage_timings": timer.stages,
+                "scenario_duration_sec": timer.total_duration_sec,
+            },
+        )
+
     async def prepare(
         self,
         account: TelegramAccount,
@@ -319,16 +458,21 @@ class HelperStarsBotScenario(BasePaymentScenario):
         1. Join channel if required.
         2. Send /start to bot.
         3. If language selection appears, click 'Русский'.
+        4. If channel subscription prompt appears, handle it.
+        5. Click 'Купить звёзды' in main menu.
+        6. Click category 'Купить звёзды'.
+        7. Send recipient username.
+        8. Wait until prompt asks to enter amount of stars.
+        9. Mark chat as prepared in Redis.
         """
         bot_username = settings.HELPERSTARS_BOT_USERNAME
         channel_username = settings.HELPERSTARS_CHANNEL_USERNAME
+        recipient = settings.STARS_RECIPIENT_USERNAME
+        if not recipient.startswith("@"):
+            recipient = f"@{recipient}"
+
         try:
-            logger.info(
-                "helperstars_prepare_started",
-                account_id=str(account.id),
-                bot=bot_username,
-                channel=channel_username,
-            )
+            logger.info("helperstars_prepare_started", account_id=str(account.id))
             await join_channel_safely(client, channel_username)
 
             start_msg = await client.send_message(bot_username, "/start")
@@ -347,11 +491,89 @@ class HelperStarsBotScenario(BasePaymentScenario):
 
             btn_lang = find_button_by_text(first_reply, "русский")
             if btn_lang:
-                logger.info("helperstars_prepare_select_language")
                 await click_button_fast(client, btn_lang)
+                next_msg = await wait_for_bot_message(
+                    client=client,
+                    peer=bot_username,
+                    predicate=lambda m: (
+                        find_button_by_text(m, "купить звёзды") is not None
+                        or "подписаться" in (getattr(m, "text", "") or "").lower()
+                        or "текущий баланс" in (getattr(m, "text", "") or "").lower()
+                    ),
+                    timeout=15.0,
+                )
+            else:
+                next_msg = first_reply
 
+            btn_channel = find_button_by_text(
+                next_msg, "helperstars"
+            ) or find_button_by_text(next_msg, "подписаться")
+            if (
+                btn_channel
+                or "подписаться" in (getattr(next_msg, "text", "") or "").lower()
+            ):
+                await join_channel_safely(client, channel_username)
+                main_menu = await wait_for_bot_message(
+                    client=client,
+                    peer=bot_username,
+                    predicate=lambda m: (
+                        find_button_by_text(m, "купить звёзды") is not None
+                        or "текущий баланс" in (getattr(m, "text", "") or "").lower()
+                        or "выберите действие" in (getattr(m, "text", "") or "").lower()
+                    ),
+                    timeout=15.0,
+                )
+            else:
+                main_menu = next_msg
+
+            buy_stars_btn = find_button_by_text(main_menu, "купить звёзды")
+            if not buy_stars_btn:
+                raise AppException(
+                    "Could not find 'Купить звёзды' button in main menu."
+                )
+            await click_button_fast(client, buy_stars_btn)
+
+            cat_menu = await wait_for_bot_message(
+                client=client,
+                peer=bot_username,
+                predicate=lambda m: (
+                    find_button_by_text(m, "купить звёзды") is not None
+                    or "введите юзернейм" in (getattr(m, "text", "") or "").lower()
+                ),
+                timeout=15.0,
+            )
+
+            cat_btn = find_button_by_text(cat_menu, "купить звёзды")
+            if cat_btn:
+                await click_button_fast(client, cat_btn)
+
+            await wait_for_bot_message(
+                client=client,
+                peer=bot_username,
+                predicate=lambda m: (
+                    "введите юзернейм" in (getattr(m, "text", "") or "").lower()
+                    or "дарить звёзды" in (getattr(m, "text", "") or "").lower()
+                ),
+                timeout=15.0,
+            )
+
+            send_user_msg = await client.send_message(bot_username, recipient)
+
+            await wait_for_bot_message(
+                client=client,
+                peer=bot_username,
+                predicate=lambda m: (
+                    "введите количество звёзд" in (getattr(m, "text", "") or "").lower()
+                    or "получатель:" in (getattr(m, "text", "") or "").lower()
+                ),
+                timeout=15.0,
+                min_id=send_user_msg.id,
+            )
+
+            await set_scenario_prepared(account.id, self.scenario_id)
             logger.info("helperstars_prepare_completed", account_id=str(account.id))
         except Exception as exc:
+            await clear_scenario_prepared(account.id, self.scenario_id)
             logger.warning(
                 "helperstars_prepare_failed",
                 account_id=str(account.id),

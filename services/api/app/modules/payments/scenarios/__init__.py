@@ -25,6 +25,11 @@ from app.modules.payments.scenarios.starshoppik_scenario import (
 from app.modules.payments.scenarios.starslly_scenario import (
     StarsllyBotScenario,
 )
+from app.modules.payments.scenarios.state import (
+    clear_scenario_prepared,
+    is_scenario_prepared,
+    set_scenario_prepared,
+)
 
 __all__ = [
     "BasePaymentScenario",
@@ -37,5 +42,8 @@ __all__ = [
     "StarShoppikBotScenario",
     "StarsllyBotScenario",
     "calculate_stars_from_amount",
+    "clear_scenario_prepared",
+    "is_scenario_prepared",
     "scenario_registry",
+    "set_scenario_prepared",
 ]

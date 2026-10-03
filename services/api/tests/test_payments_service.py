@@ -336,3 +336,70 @@ async def test_prepare_account_scenarios_service(db_session: AsyncSession) -> No
         assert result["status"] == "completed"
         assert result["account_id"] == str(acc.id)
         assert "mock_bot" in result["results"]
+
+
+@pytest.mark.asyncio
+async def test_prepare_single_scenario_service(db_session: AsyncSession) -> None:
+    """Test prepare_single_scenario logic."""
+    from app.modules.payments.service import prepare_single_scenario
+
+    acc = await _create_test_account(db_session, "Prep Single Acc")
+
+    mock_client = AsyncMock()
+    with patch(
+        "app.modules.accounts.session_pool.telegram_session_pool.get_connected_client",
+        new=AsyncMock(return_value=mock_client),
+    ):
+        result = await prepare_single_scenario(
+            db_session, acc.id, scenario_id="mock_bot"
+        )
+        assert result["status"] == "completed"
+        assert result["scenario_id"] == "mock_bot"
+
+
+@pytest.mark.asyncio
+async def test_refresh_idle_account_scenarios_service(
+    db_session: AsyncSession,
+) -> None:
+    """Test refresh_idle_account_scenarios finds and refreshes idle accounts."""
+    from app.modules.payments.service import refresh_idle_account_scenarios
+
+    _acc = await _create_test_account(db_session, "Idle Refresh Acc")
+
+    mock_client = AsyncMock()
+    with (
+        patch(
+            "app.modules.accounts.session_pool.telegram_session_pool.get_connected_client",
+            new=AsyncMock(return_value=mock_client),
+        ),
+        patch(
+            "app.modules.payments.scenarios.state.is_scenario_prepared",
+            new=AsyncMock(return_value=False),
+        ),
+    ):
+        result = await refresh_idle_account_scenarios(db_session)
+        assert result["status"] == "completed"
+        assert result["idle_accounts_count"] >= 1
+        assert result["refreshed_count"] >= 1
+
+
+@pytest.mark.asyncio
+async def test_fast_path_payment_execution(db_session: AsyncSession) -> None:
+    """Test that pre-warmed account uses fast-path when creating payment."""
+    from app.modules.payments.scenarios.state import set_scenario_prepared
+
+    acc = await _create_test_account(db_session, "Fast Path Acc")
+    await set_scenario_prepared(acc.id, "mock_bot")
+
+    payment = await create_payment(
+        db_session,
+        PaymentCreate(
+            client_user_id="fast_user",
+            scenario_id="mock_bot",
+            amount=Decimal("150.00"),
+        ),
+    )
+    assert payment.meta.get("is_fast_path") is True
+    timings = payment.meta.get("stage_timings", [])
+    fast_stages = [s for s in timings if "быстрый путь" in s.get("description", "")]
+    assert len(fast_stages) >= 1

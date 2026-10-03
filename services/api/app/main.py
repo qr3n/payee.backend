@@ -56,10 +56,14 @@ async def _periodic_background_runner() -> None:
             # Dispatch background tasks to Taskiq worker
             try:
                 from app.modules.accounts.tasks import check_all_accounts_task
-                from app.modules.payments.tasks import expire_overdue_payments_task
+                from app.modules.payments.tasks import (
+                    expire_overdue_payments_task,
+                    refresh_idle_account_scenarios_task,
+                )
 
                 await check_all_accounts_task.kiq()
                 await expire_overdue_payments_task.kiq()
+                await refresh_idle_account_scenarios_task.kiq()
             except Exception as task_err:
                 logger.error(
                     "Failed dispatching periodic background tasks", error=str(task_err)

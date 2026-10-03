@@ -169,5 +169,11 @@ async def wait_for_bot_message(
 
         return result_future.result()
     finally:
-        client.remove_event_handler(h_new)
-        client.remove_event_handler(h_edit)
+        import inspect
+
+        res_new = client.remove_event_handler(h_new)
+        if inspect.isawaitable(res_new):
+            await res_new
+        res_edit = client.remove_event_handler(h_edit)
+        if inspect.isawaitable(res_edit):
+            await res_edit

@@ -168,6 +168,23 @@ async def create_payment(
     session.add(payment)
     await session.flush()
     await session.refresh(payment)
+
+    # 4. Trigger non-blocking background re-preparation for subsequent use
+    try:
+        from app.modules.payments.tasks import dispatch_single_scenario_warmup
+
+        await dispatch_single_scenario_warmup(
+            account_id=account.id,
+            scenario_id=scenario.scenario_id,
+        )
+    except Exception as exc:
+        logger.warning(
+            "failed_dispatching_post_payment_warmup",
+            account_id=str(account.id),
+            scenario_id=scenario.scenario_id,
+            error=str(exc),
+        )
+
     return payment
 
 
@@ -325,4 +342,108 @@ async def prepare_account_scenarios(
         "status": "completed",
         "account_id": str(account.id),
         "results": results,
+    }
+
+
+async def prepare_single_scenario(
+    session: AsyncSession,
+    account_id: UUID,
+    scenario_id: str,
+) -> dict[str, Any]:
+    """
+    Execute background warmup/preparation for a specific scenario on an account.
+    """
+    from app.modules.accounts.session_pool import telegram_session_pool
+
+    account = await session.get(TelegramAccount, account_id)
+    if not account or account.status != AccountStatus.ACTIVE:
+        return {"status": "skipped", "reason": "Account missing or inactive"}
+
+    scenario = scenario_registry.get(scenario_id)
+    if not scenario:
+        return {"status": "skipped", "reason": f"Scenario {scenario_id} not found"}
+
+    try:
+        client = await telegram_session_pool.get_connected_client(account)
+        logger.info(
+            "preparing_single_scenario_for_account",
+            scenario_id=scenario_id,
+            account_id=str(account.id),
+        )
+        await scenario.prepare(account=account, client=client)
+        return {
+            "status": "completed",
+            "account_id": str(account.id),
+            "scenario_id": scenario_id,
+        }
+    except Exception as exc:
+        logger.error(
+            "single_scenario_prepare_error",
+            scenario_id=scenario_id,
+            account_id=str(account.id),
+            error=str(exc),
+        )
+        return {"status": "error", "error": str(exc)}
+
+
+async def refresh_idle_account_scenarios(
+    session: AsyncSession,
+) -> dict[str, Any]:
+    """
+    Scan active accounts without active pending payments and re-prepare
+    any scenarios whose preparation is missing or expired in Redis.
+    """
+    from app.modules.payments.scenarios.state import is_scenario_prepared
+
+    now = datetime.now(UTC)
+    pending_accounts_query = select(Payment.account_id).where(
+        Payment.status == PaymentStatus.PENDING,
+        Payment.expires_at > now,
+    )
+    pending_res = await session.exec(pending_accounts_query)
+    busy_account_ids = set(pending_res.all())
+
+    acc_query = select(TelegramAccount).where(
+        TelegramAccount.status == AccountStatus.ACTIVE,
+    )
+    acc_res = await session.exec(acc_query)
+    active_accounts = [acc for acc in acc_res.all() if acc.id not in busy_account_ids]
+
+    scenarios = scenario_registry.list()
+    refreshed: list[dict[str, str]] = []
+
+    for acc in active_accounts:
+        for scen in scenarios:
+            try:
+                is_prep = await is_scenario_prepared(acc.id, scen.scenario_id)
+                if not is_prep:
+                    logger.info(
+                        "refreshing_idle_unprepared_scenario",
+                        account_id=str(acc.id),
+                        scenario_id=scen.scenario_id,
+                    )
+                    await prepare_single_scenario(
+                        session=session,
+                        account_id=acc.id,
+                        scenario_id=scen.scenario_id,
+                    )
+                    refreshed.append(
+                        {
+                            "account_id": str(acc.id),
+                            "scenario_id": scen.scenario_id,
+                        }
+                    )
+            except Exception as exc:
+                logger.warning(
+                    "failed_refreshing_scenario",
+                    account_id=str(acc.id),
+                    scenario_id=scen.scenario_id,
+                    error=str(exc),
+                )
+
+    return {
+        "status": "completed",
+        "idle_accounts_count": len(active_accounts),
+        "refreshed_count": len(refreshed),
+        "refreshed": refreshed,
     }

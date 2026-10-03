@@ -4,12 +4,20 @@ Mock payment scenario for testing, validation, and demo runs.
 
 from uuid import uuid4
 
+from telethon import TelegramClient
+
+from app.modules.accounts.models import TelegramAccount
 from app.modules.payments.scenarios.base import (
     BasePaymentScenario,
     ScenarioContext,
     ScenarioResult,
 )
 from app.modules.payments.scenarios.stage_timer import StageTimer
+from app.modules.payments.scenarios.state import (
+    clear_scenario_prepared,
+    is_scenario_prepared,
+    set_scenario_prepared,
+)
 
 
 class MockBotScenario(BasePaymentScenario):
@@ -30,7 +38,18 @@ class MockBotScenario(BasePaymentScenario):
             f"https://t.me/{bot_username}?start=pay_{token}_{ctx.amount}_{ctx.currency}"
         )
         timer.record_stage("connect_session", "Подключение тестовой сессии")
-        timer.record_stage("generate_link", "Генерация тестовой ссылки")
+
+        is_prep = await is_scenario_prepared(ctx.account.id, self.scenario_id)
+        if is_prep:
+            timer.record_stage(
+                "generate_link",
+                "Мгновенная генерация ссылки [быстрый путь]",
+            )
+            await clear_scenario_prepared(ctx.account.id, self.scenario_id)
+            is_fast = True
+        else:
+            timer.record_stage("generate_link", "Генерация тестовой ссылки")
+            is_fast = False
 
         return ScenarioResult(
             payment_link=payment_link,
@@ -38,7 +57,16 @@ class MockBotScenario(BasePaymentScenario):
                 "mock_token": token,
                 "account_used": ctx.account.title,
                 "payer": ctx.client_user_id,
+                "is_fast_path": is_fast,
                 "stage_timings": timer.stages,
                 "scenario_duration_sec": timer.total_duration_sec,
             },
         )
+
+    async def prepare(
+        self,
+        account: TelegramAccount,
+        client: TelegramClient,
+    ) -> None:
+        _ = client
+        await set_scenario_prepared(account.id, self.scenario_id)

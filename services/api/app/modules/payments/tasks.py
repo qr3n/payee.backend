@@ -55,6 +55,50 @@ async def prepare_account_scenarios_task(
     return result
 
 
+@broker.task(task_name="payments:prepare_single_scenario")
+async def prepare_single_scenario_task(
+    account_id: UUID,
+    scenario_id: str,
+    db: AsyncSession = TaskiqDepends(get_db),
+) -> dict[str, Any]:
+    """
+    Background worker job to prepare/warm up a specific scenario
+    for the given Telegram account.
+    """
+    logger.info(
+        "Executing single scenario preparation task",
+        account_id=str(account_id),
+        scenario_id=scenario_id,
+    )
+    result = await payment_service.prepare_single_scenario(
+        session=db,
+        account_id=account_id,
+        scenario_id=scenario_id,
+    )
+    logger.info(
+        "Single scenario preparation finished",
+        account_id=str(account_id),
+        scenario_id=scenario_id,
+        result=result,
+    )
+    return result
+
+
+@broker.task(task_name="payments:refresh_idle_account_scenarios")
+async def refresh_idle_account_scenarios_task(
+    db: AsyncSession = TaskiqDepends(get_db),
+) -> dict[str, Any]:
+    """
+    Periodic background job to check active accounts without active pending
+    payments and re-prepare any scenarios whose preparation is missing or
+    expired in Redis.
+    """
+    logger.info("Executing refresh idle account scenarios task")
+    result = await payment_service.refresh_idle_account_scenarios(session=db)
+    logger.info("Refresh idle account scenarios finished", result=result)
+    return result
+
+
 async def dispatch_account_scenarios_warmup(account_id: UUID) -> None:
     """
     Safely enqueue background scenarios preparation for an account.
@@ -70,5 +114,32 @@ async def dispatch_account_scenarios_warmup(account_id: UUID) -> None:
         logger.warning(
             "Failed to enqueue account warmup task",
             account_id=str(account_id),
+            error=str(exc),
+        )
+
+
+async def dispatch_single_scenario_warmup(
+    account_id: UUID,
+    scenario_id: str,
+) -> None:
+    """
+    Safely enqueue background preparation for a single scenario on an account.
+    Non-blocking, gracefully logs if broker enqueue fails.
+    """
+    try:
+        await prepare_single_scenario_task.kiq(
+            account_id=account_id,
+            scenario_id=scenario_id,
+        )
+        logger.info(
+            "Enqueued single scenario warmup task",
+            account_id=str(account_id),
+            scenario_id=scenario_id,
+        )
+    except Exception as exc:
+        logger.warning(
+            "Failed to enqueue single scenario warmup task",
+            account_id=str(account_id),
+            scenario_id=scenario_id,
             error=str(exc),
         )

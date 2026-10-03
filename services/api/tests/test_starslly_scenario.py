@@ -249,7 +249,30 @@ async def test_starslly_scenario_prepare() -> None:
     msg_reply.text = "Подпишитесь"
     msg_reply.buttons = [[btn_verify]]
 
-    mock_client.get_messages = AsyncMock(return_value=[msg_reply])
+    btn_friend = MagicMock()
+    btn_friend.text = "Купить другу"
+
+    msg_menu = MagicMock()
+    msg_menu.id = 52
+    msg_menu.out = False
+    msg_menu.text = "Купить звезды"
+    msg_menu.buttons = [[btn_friend]]
+
+    msg_username = MagicMock()
+    msg_username.id = 53
+    msg_username.out = False
+    msg_username.text = "Введите юзернейм"
+    msg_username.buttons = []
+
+    msg_count = MagicMock()
+    msg_count.id = 54
+    msg_count.out = False
+    msg_count.text = "Введите количество звезд (покупка для @test)"
+    msg_count.buttons = []
+
+    mock_client.get_messages = AsyncMock(
+        side_effect=[[msg_reply], [msg_menu], [msg_username], [msg_count]]
+    )
 
     with (
         patch(
@@ -265,5 +288,5 @@ async def test_starslly_scenario_prepare() -> None:
         await scenario.prepare(account=account, client=mock_client)
 
         mock_join.assert_awaited_once()
-        mock_client.send_message.assert_awaited_once()
-        mock_click.assert_awaited_once_with(mock_client, btn_verify)
+        assert mock_client.send_message.await_count >= 1
+        assert mock_click.await_count >= 1

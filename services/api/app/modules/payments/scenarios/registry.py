@@ -8,7 +8,6 @@ from app.modules.payments.scenarios.base import BasePaymentScenario
 from app.modules.payments.scenarios.helperstars_scenario import (
     HelperStarsBotScenario,
 )
-from app.modules.payments.scenarios.mock_scenario import MockBotScenario
 from app.modules.payments.scenarios.starshoppik_scenario import (
     StarShoppikBotScenario,
 )
@@ -20,8 +19,7 @@ class ScenarioRegistry:
 
     def __init__(self) -> None:
         self._scenarios: dict[str, BasePaymentScenario] = {}
-        # Pre-register default scenarios
-        self.register(MockBotScenario())
+        # Pre-register default production bot scenarios
         self.register(StarsllyBotScenario())
         self.register(StarShoppikBotScenario())
         self.register(HelperStarsBotScenario())

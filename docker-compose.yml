@@ -16,6 +16,8 @@ services:
         required: false
     networks:
       - gateway
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
     restart: unless-stopped
 
   postgres:

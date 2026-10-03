@@ -103,9 +103,15 @@ async def setup_test_redis(
     monkeypatch: pytest.MonkeyPatch, fake_redis: Redis
 ) -> AsyncGenerator[None, None]:
     """Ensure all core redis functions point to fake_redis during tests."""
+    from app.modules.payments.scenarios import (
+        MockBotScenario,
+        scenario_registry,
+    )
+
     monkeypatch.setattr("app.core.redis.redis_client", fake_redis)
     monkeypatch.setattr("app.core.redis.get_redis_client", lambda: fake_redis)
     monkeypatch.setattr("app.core.db.async_session_maker", test_session_maker)
+    scenario_registry.register(MockBotScenario())
     yield
 
 

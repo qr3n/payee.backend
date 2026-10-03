@@ -1,0 +1,14 @@
+http:
+  routers:
+    frontend-dev:
+      rule: "Host(`app.localhost`)"
+      entryPoints:
+        - web
+      service: frontend-dev-service
+      priority: 10
+
+  services:
+    frontend-dev-service:
+      loadBalancer:
+        servers:
+          - url: "http://host.docker.internal:3000"

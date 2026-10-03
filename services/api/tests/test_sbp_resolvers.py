@@ -4,6 +4,7 @@ Unit and integration tests for SBP link resolvers (Antilopay and Cardlink).
 
 from unittest.mock import AsyncMock, MagicMock, patch
 
+import httpx
 import pytest
 
 from app.modules.payments.resolvers import (
@@ -122,6 +123,34 @@ async def test_antilopay_resolve_failure_returns_none() -> None:
         link, is_clean = await resolve_sbp_link(test_url)
         assert link == test_url
         assert is_clean is False
+
+
+@pytest.mark.asyncio
+async def test_antilopay_resolve_recovers_from_dns_error() -> None:
+    """Test that transient DNS ConnectError on initial GET is retried and succeeds."""
+    test_url = "https://gate.antilopay.com/payment/APAY12345"
+
+    mock_success_get = AsyncMock()
+    mock_success_get.status_code = 200
+    mock_success_get.json = MagicMock(
+        return_value={
+            "status": "PENDING",
+            "provideMethod": "SBP",
+            "qrcId": "AD1010DNSRECOVERY888",
+        }
+    )
+
+    get_side_effects = [
+        httpx.ConnectError("[Errno -5] No address associated with hostname"),
+        mock_success_get,
+    ]
+
+    with (
+        patch("asyncio.sleep", new=AsyncMock()),
+        patch("httpx.AsyncClient.get", new=AsyncMock(side_effect=get_side_effects)),
+    ):
+        result = await AntilopaySBPResolver.resolve(test_url)
+        assert result == "https://qr.nspk.ru/AD1010DNSRECOVERY888"
 
 
 @pytest.mark.asyncio

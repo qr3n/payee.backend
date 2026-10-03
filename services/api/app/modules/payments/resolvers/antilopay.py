@@ -103,17 +103,33 @@ class AntilopaySBPResolver:
             async with httpx.AsyncClient(
                 headers=headers, timeout=timeout_cfg
             ) as client:
-                # 1. GET payment details
-                res = await client.get(
-                    f"{cls.BASE_URL}/payment",
-                    params={"id": payment_id, "referer": ""},
-                )
-                if res.status_code != 200:
-                    logger.warning(
-                        "antilopay_get_payment_failed",
-                        status_code=res.status_code,
-                        payment_id=payment_id,
-                    )
+                # 1. GET payment details with connection / DNS retry
+                res = None
+                for get_attempt in range(1, 4):
+                    try:
+                        res = await client.get(
+                            f"{cls.BASE_URL}/payment",
+                            params={"id": payment_id, "referer": ""},
+                        )
+                        if res.status_code == 200:
+                            break
+                        logger.warning(
+                            "antilopay_get_payment_failed",
+                            status_code=res.status_code,
+                            payment_id=payment_id,
+                            attempt=get_attempt,
+                        )
+                    except (httpx.HTTPError, httpx.TimeoutException, OSError) as exc:
+                        logger.warning(
+                            "antilopay_get_payment_connect_error",
+                            payment_id=payment_id,
+                            attempt=get_attempt,
+                            error=str(exc),
+                        )
+                    if get_attempt < 3:
+                        await asyncio.sleep(0.5 * get_attempt)
+
+                if res is None or res.status_code != 200:
                     return None
 
                 data = res.json()
@@ -164,7 +180,7 @@ class AntilopaySBPResolver:
                             files=form_files,
                             headers=perform_headers,
                         )
-                    except (httpx.TimeoutException, httpx.HTTPError) as exc:
+                    except (httpx.TimeoutException, httpx.HTTPError, OSError) as exc:
                         logger.warning(
                             "antilopay_perform_request_error",
                             payment_id=payment_id,
@@ -226,7 +242,11 @@ class AntilopaySBPResolver:
                                             attempt=attempt,
                                         )
                                         return recheck_link
-                        except Exception as exc:
+                        except (
+                            httpx.TimeoutException,
+                            httpx.HTTPError,
+                            OSError,
+                        ) as exc:
                             logger.debug(
                                 "antilopay_recheck_failed",
                                 payment_id=payment_id,

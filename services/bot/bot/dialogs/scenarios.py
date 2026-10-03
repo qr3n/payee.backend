@@ -1,4 +1,5 @@
 import time
+from contextlib import suppress
 from decimal import Decimal, InvalidOperation
 from typing import Any
 
@@ -297,11 +298,11 @@ async def on_amount_entered(
     """Handle custom amount input."""
     try:
         val = Decimal(text.strip().replace(",", "."))
-        if val <= 0:
-            raise ValueError("Сумма должна быть больше нуля")
-    except (InvalidOperation, ValueError):
+        if val < 50:
+            raise ValueError("Минимальная сумма заказа — 50 звёзд")
+    except (InvalidOperation, ValueError) as err:
         dialog_manager.dialog_data["amount_error"] = (
-            "Некорректная сумма. Введите число (например 495):"
+            f"Некорректная сумма: {err}. Введите число от 50:"
         )
         return
 
@@ -317,6 +318,8 @@ async def on_quick_amount(
 ) -> None:
     if not button.widget_id:
         return
+    with suppress(Exception):
+        await callback.answer("⏳ Создаем платёж...", show_alert=False)
     amount_str = button.widget_id.split("_")[-1]
     amount = Decimal(amount_str)
     api_client: ApiClient = dialog_manager.middleware_data["api_client"]

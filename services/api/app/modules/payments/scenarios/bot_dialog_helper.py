@@ -10,6 +10,7 @@ from typing import Any
 from telethon import TelegramClient, errors, events, functions, types
 from telethon.tl.custom.messagebutton import MessageButton
 
+from app.core.exceptions import AppException
 from app.core.logging import get_logger
 
 logger = get_logger(__name__)
@@ -108,6 +109,28 @@ async def click_button_fast(
     return await button.click()
 
 
+def check_bot_blocked_message(msg: Any) -> None:
+    """Raise AppException if incoming bot message indicates the account is blocked."""
+    if not msg or getattr(msg, "out", False):
+        return
+    text = (getattr(msg, "text", "") or "").lower()
+    if (
+        "заблокированы в этом боте" in text
+        or "вы заблокированы" in text
+        or "пользователь заблокирован" in text
+        or "аккаунт заблокирован" in text
+        or "доступ к боту ограничен" in text
+        or ("🚫" in text and "заблокирован" in text)
+    ):
+        raw_text = (getattr(msg, "text", "") or "").strip()
+        logger.warning("account_blocked_by_bot", bot_message=raw_text)
+        raise AppException(
+            message=f"Аккаунт заблокирован ботом: {raw_text}",
+            code="ACCOUNT_BLOCKED_IN_BOT",
+            status_code=403,
+        )
+
+
 async def wait_for_bot_message(
     client: TelegramClient,
     peer: Any,
@@ -125,8 +148,12 @@ async def wait_for_bot_message(
     try:
         recent = await client.get_messages(peer, limit=6, min_id=min_id or 0)
         for msg in recent:
-            if not getattr(msg, "out", False) and predicate(msg):
-                return msg
+            if not getattr(msg, "out", False):
+                check_bot_blocked_message(msg)
+                if predicate(msg):
+                    return msg
+    except AppException:
+        raise
     except Exception as e:
         logger.debug("Initial message check failed", error=str(e))
 
@@ -137,8 +164,14 @@ async def wait_for_bot_message(
     async def on_event(event: Any) -> None:
         if not result_future.done():
             msg = getattr(event, "message", None)
-            if msg and not getattr(msg, "out", False) and predicate(msg):
-                result_future.set_result(msg)
+            if msg and not getattr(msg, "out", False):
+                try:
+                    check_bot_blocked_message(msg)
+                except AppException as exc:
+                    result_future.set_exception(exc)
+                    return
+                if predicate(msg):
+                    result_future.set_result(msg)
 
     h_new = client.add_event_handler(on_event, events.NewMessage(chats=peer))
     h_edit = client.add_event_handler(on_event, events.MessageEdited(chats=peer))
@@ -162,8 +195,12 @@ async def wait_for_bot_message(
                 try:
                     msgs = await client.get_messages(peer, limit=6, min_id=min_id or 0)
                     for msg in msgs:
-                        if not getattr(msg, "out", False) and predicate(msg):
-                            return msg
+                        if not getattr(msg, "out", False):
+                            check_bot_blocked_message(msg)
+                            if predicate(msg):
+                                return msg
+                except AppException:
+                    raise
                 except Exception:
                     pass
 

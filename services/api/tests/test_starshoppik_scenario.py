@@ -302,3 +302,37 @@ async def test_starshoppik_scenario_prepare() -> None:
         mock_join.assert_awaited_once()
         mock_client.send_message.assert_awaited_once()
         mock_click.assert_awaited_once_with(mock_client, btn_sub)
+
+
+@pytest.mark.asyncio
+async def test_starshoppik_bot_scenario_account_blocked(
+    scenario_context: ScenarioContext,
+) -> None:
+    """Test that bot block message immediately raises ACCOUNT_BLOCKED_IN_BOT."""
+    mock_client = AsyncMock()
+    mock_start = MagicMock()
+    mock_start.id = 100
+    mock_client.send_message = AsyncMock(return_value=mock_start)
+
+    msg_blocked = MagicMock()
+    msg_blocked.id = 101
+    msg_blocked.out = False
+    msg_blocked.text = "🚫 Вы заблокированы в этом боте."
+    msg_blocked.buttons = []
+
+    mock_client.get_messages = AsyncMock(return_value=[msg_blocked])
+
+    scenario = StarShoppikBotScenario()
+    with pytest.raises(AppException) as exc_info:
+        await scenario._create_payment_full(
+            client=mock_client,
+            ctx=scenario_context,
+            timer=MagicMock(),
+            bot_username="StarShoppik_bot",
+            channel_username="StarShoppik_Channel",
+            recipient="@qr3nnn",
+            stars_count=50,
+        )
+
+    assert exc_info.value.code == "ACCOUNT_BLOCKED_IN_BOT"
+    assert "заблокирован" in str(exc_info.value).lower()

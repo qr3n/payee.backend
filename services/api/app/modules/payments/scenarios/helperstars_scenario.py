@@ -191,7 +191,7 @@ class HelperStarsBotScenario(BasePaymentScenario):
                 or "деталями заказа" in (getattr(m, "text", "") or "").lower()
                 or "счёт" in (getattr(m, "text", "") or "").lower()
             ),
-            timeout=5.0,
+            timeout=2.5,
             min_id=send_stars_msg.id,
         )
         timer.record_stage(

@@ -203,6 +203,28 @@ async def on_check_account(
         await callback.answer(f"Ошибка: {exc}", show_alert=True)
 
 
+async def on_check_all_accounts(
+    callback: CallbackQuery,
+    _button: Button,
+    dialog_manager: DialogManager,
+) -> None:
+    """Trigger batch MTProto verification across all accounts."""
+    api_client: ApiClient = dialog_manager.middleware_data["api_client"]
+    await callback.answer("⏳ Запущена проверка всех сессий...", show_alert=False)
+    try:
+        res = await api_client.check_all_accounts()
+        dialog_manager.dialog_data["last_action_msg"] = (
+            f"📊 <b>Проверка завершена:</b> "
+            f"Всего: {res.total} | 🟢 {res.active} | "
+            f"🔴 {res.revoked} | ⛔️ {res.banned} | "
+            f"🟡 {res.flood_wait} | ❌ {res.error}"
+        )
+    except Exception as exc:
+        dialog_manager.dialog_data["last_action_msg"] = (
+            f"❌ Ошибка проверки сессий: {exc}"
+        )
+
+
 async def on_delete_account(
     callback: CallbackQuery,
     _button: Button,
@@ -524,15 +546,21 @@ accounts_list_window = Window(
         hide_on_single_page=True,
     ),
     Row(
+        Button(
+            Const("🔄 Проверить все"),
+            id="btn_check_all_accounts",
+            on_click=on_check_all_accounts,
+            when="has_accounts",
+        ),
         SwitchTo(
             Const("➕ Добавить сессию"),
             id="to_choose_method",
             state=AccountsSG.choose_add_method,
         ),
-        Cancel(
-            Const("🔙 Главное меню"),
-            id="cancel_to_menu",
-        ),
+    ),
+    Cancel(
+        Const("🔙 Главное меню"),
+        id="cancel_to_menu",
     ),
     getter=get_accounts_list,
     state=AccountsSG.list_accounts,

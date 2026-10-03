@@ -15,6 +15,14 @@ redis_pool: ConnectionPool = ConnectionPool.from_url(
 redis_client: Redis = Redis(connection_pool=redis_pool)
 
 
+def get_redis_client() -> Redis:
+    """Return shared Redis client instance."""
+    return redis_client
+
+
+get_redis = get_redis_client
+
+
 async def ping_redis() -> bool:
     """Check whether Redis is reachable and responding."""
     try:

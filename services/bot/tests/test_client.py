@@ -8,6 +8,7 @@ import pytest
 
 from bot.client.api import ApiClient
 from bot.client.schemas import (
+    CheckAllAccountsResponse,
     HealthCheckResponse,
     PaginatedResponse,
     PaymentRead,
@@ -435,5 +436,39 @@ async def test_client_upload_and_phone_auth() -> None:
         assert signed.status == "success"
         assert signed.account is not None
         assert signed.account.title == "Phone Worker"
+    finally:
+        await api_client.close()
+
+
+@pytest.mark.asyncio
+async def test_client_check_all_accounts() -> None:
+    def handler(request: httpx.Request) -> httpx.Response:
+        assert request.url.path == "/api/v1/accounts/check-all"
+        assert request.method == "POST"
+        return httpx.Response(
+            200,
+            json={
+                "total": 5,
+                "active": 3,
+                "revoked": 1,
+                "banned": 1,
+                "flood_wait": 0,
+                "error": 0,
+            },
+        )
+
+    transport = httpx.MockTransport(handler)
+    api_client = ApiClient(base_url="http://test-server")
+    api_client._client = httpx.AsyncClient(
+        transport=transport, base_url="http://test-server"
+    )
+
+    try:
+        res = await api_client.check_all_accounts()
+        assert isinstance(res, CheckAllAccountsResponse)
+        assert res.total == 5
+        assert res.active == 3
+        assert res.revoked == 1
+        assert res.banned == 1
     finally:
         await api_client.close()

@@ -6,6 +6,7 @@ import httpx
 import structlog
 
 from bot.client.schemas import (
+    CheckAllAccountsResponse,
     HealthCheckResponse,
     PaginatedResponse,
     PaymentCreate,
@@ -204,6 +205,13 @@ class ApiClient:
         response = await client.post(f"/api/v1/accounts/{account_id}/check")
         response.raise_for_status()
         return TelegramAccountCheckResponse.model_validate(response.json())
+
+    async def check_all_accounts(self) -> CheckAllAccountsResponse:
+        """Trigger batch health verification across all non-disabled accounts."""
+        client = await self.get_client()
+        response = await client.post("/api/v1/accounts/check-all")
+        response.raise_for_status()
+        return CheckAllAccountsResponse.model_validate(response.json())
 
     async def delete_account(self, account_id: str | UUID) -> None:
         """Delete an account from the pool."""

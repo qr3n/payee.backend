@@ -10,18 +10,23 @@ from uuid import UUID
 from sqlmodel import col, func, select
 from sqlmodel.ext.asyncio.session import AsyncSession
 
+from app.core.logging import get_logger
 from app.modules.accounts.device_profiles import generate_device_profile
-from app.modules.accounts.models import TelegramAccount
+from app.modules.accounts.models import AccountStatus, TelegramAccount
+from app.modules.accounts.notifier import notify_status_change_if_needed
 from app.modules.accounts.schemas import (
     TelegramAccountCheckResponse,
     TelegramAccountCreate,
     TelegramAccountUpdate,
 )
+from app.modules.accounts.session_pool import telegram_session_pool
 from app.modules.accounts.telethon_checker import (
     calculate_flood_wait_until,
     check_telegram_account_status,
 )
 from app.shared.pagination import PageParams
+
+logger = get_logger(__name__)
 
 
 async def create_account(
@@ -144,8 +149,11 @@ async def verify_and_update_account(
 ) -> tuple[TelegramAccount, TelegramAccountCheckResponse]:
     """
     Perform an MTProto connection check on the account, update its state in DB,
-    and return the detailed response.
+    evict broken sockets from the warm pool, notify administrators on status
+    transitions, and return the detailed response.
     """
+    old_status = db_account.status
+
     check = await check_telegram_account_status(
         session_string=db_account.session_string,
         api_id=db_account.api_id,
@@ -177,9 +185,31 @@ async def verify_and_update_account(
             check.flood_wait_seconds
         )
 
+    # Evict dead socket if session revoked or banned
+    if check.status in (AccountStatus.REVOKED, AccountStatus.BANNED):
+        try:
+            await telegram_session_pool.close_account(db_account.id)
+        except Exception as pool_err:
+            logger.debug("Failed closing revoked account in pool", error=str(pool_err))
+
     session.add(db_account)
     await session.flush()
     await session.refresh(db_account)
+
+    # Dispatch admin alert if status transition or issue encountered
+    try:
+        await notify_status_change_if_needed(
+            account=db_account,
+            old_status=old_status,
+            new_status=check.status,
+            error=check.error,
+        )
+    except Exception as notify_err:
+        logger.error(
+            "failed_dispatching_account_status_notification",
+            account_id=str(db_account.id),
+            error=str(notify_err),
+        )
 
     response = TelegramAccountCheckResponse(
         account_id=db_account.id,
@@ -197,6 +227,48 @@ async def verify_and_update_account(
     )
 
     return db_account, response
+
+
+async def check_all_accounts(
+    session: AsyncSession,
+) -> dict[str, int]:
+    """
+    Perform batch health verification across all non-disabled Telegram accounts.
+    Updates database states, evicts revoked connections, and alerts administrators.
+    """
+    statement = select(TelegramAccount).where(
+        TelegramAccount.status != AccountStatus.DISABLED
+    )
+    result = await session.exec(statement)
+    accounts = list(result.all())
+
+    counts: dict[str, int] = {
+        "total": len(accounts),
+        "active": 0,
+        "revoked": 0,
+        "banned": 0,
+        "flood_wait": 0,
+        "error": 0,
+    }
+
+    for account in accounts:
+        try:
+            _, check_resp = await verify_and_update_account(session, account)
+            status_val = check_resp.status.value
+            if status_val in counts:
+                counts[status_val] += 1
+            else:
+                counts["error"] += 1
+        except Exception as exc:
+            logger.error(
+                "failed_checking_account_health",
+                account_id=str(account.id),
+                title=account.title,
+                error=str(exc),
+            )
+            counts["error"] += 1
+
+    return counts
 
 
 async def create_account_from_files(

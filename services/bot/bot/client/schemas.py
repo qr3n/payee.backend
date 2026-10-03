@@ -145,3 +145,14 @@ class PaymentCreate(BaseModel):
     amount: Decimal
     currency: str = "RUB"
     meta: dict[str, Any] = {}
+
+
+class CheckAllAccountsResponse(BaseModel):
+    """Batch verification results."""
+
+    total: int
+    active: int = 0
+    revoked: int = 0
+    banned: int = 0
+    flood_wait: int = 0
+    error: int = 0

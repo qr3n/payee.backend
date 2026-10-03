@@ -12,6 +12,7 @@ from app.core.exceptions import AppException, NotFoundException
 from app.modules.accounts import phone_auth_service
 from app.modules.accounts import service as account_service
 from app.modules.accounts.schemas import (
+    CheckAllAccountsResponse,
     PhoneCodeRequest,
     PhoneCodeResponse,
     PhoneSignInRequest,
@@ -237,3 +238,20 @@ async def check_account_status(
         session=db, db_account=account
     )
     return response
+
+
+@router.post(
+    "/check-all",
+    response_model=CheckAllAccountsResponse,
+    summary="Batch verify all Telegram accounts",
+    description=(
+        "Scans all non-disabled Telegram accounts, checks their MTProto status, "
+        "updates database records, evicts revoked sessions, and alerts admins."
+    ),
+)
+async def check_all_accounts_endpoint(
+    db: AsyncSession = Depends(get_db),
+) -> CheckAllAccountsResponse:
+    """Trigger batch verification of all Telegram accounts."""
+    counts = await account_service.check_all_accounts(session=db)
+    return CheckAllAccountsResponse(**counts)

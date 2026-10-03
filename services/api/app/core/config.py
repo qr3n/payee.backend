@@ -82,6 +82,12 @@ class Settings(BaseSettings):
     HELPERSTARS_BOT_USERNAME: str = "HelperStars_Robot"
     HELPERSTARS_CHANNEL_USERNAME: str = "HelperStars_Rezerv"
 
+    # Telegram Bot Admin & Notifications
+    TELEGRAM_BOT_TOKEN: SecretStr | None = None
+    ADMIN_CHAT_IDS: list[int] = []
+    ACCOUNT_CHECK_INTERVAL_SECONDS: int = 300
+    ACCOUNT_CHECK_BACKGROUND_ENABLED: bool = True
+
     @property
     def redis_uri(self) -> str:
         """Constructs an async Redis connection string."""
@@ -108,6 +114,27 @@ class Settings(BaseSettings):
             port=self.POSTGRES_PORT,
             database=self.POSTGRES_DB,
         ).render_as_string(hide_password=False)
+
+    @field_validator("ADMIN_CHAT_IDS", mode="before")
+    @classmethod
+    def assemble_admin_chat_ids(cls, v: object) -> list[int]:
+        if isinstance(v, str):
+            v = v.strip()
+            if not v:
+                return []
+            if v.startswith("[") and v.endswith("]"):
+                import json
+
+                try:
+                    return [int(x) for x in json.loads(v)]
+                except Exception:
+                    pass
+            return [int(x.strip()) for x in v.split(",") if x.strip()]
+        if isinstance(v, (list, tuple, set)):
+            return [int(x) for x in v]
+        if isinstance(v, int):
+            return [v]
+        return []
 
     @field_validator("BACKEND_CORS_ORIGINS", mode="before")
     @classmethod

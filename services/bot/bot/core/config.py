@@ -1,7 +1,7 @@
 from functools import lru_cache
 from typing import Literal
 
-from pydantic import Field, SecretStr
+from pydantic import Field, SecretStr, field_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 
@@ -28,6 +28,31 @@ class BotSettings(BaseSettings):
         default=True,
         description="Whether to drop unhandled updates on startup",
     )
+    ADMIN_CHAT_IDS: list[int] = Field(
+        default_factory=list,
+        description="Telegram user IDs of system administrators for notifications",
+    )
+
+    @field_validator("ADMIN_CHAT_IDS", mode="before")
+    @classmethod
+    def assemble_admin_chat_ids(cls, v: object) -> list[int]:
+        if isinstance(v, str):
+            v = v.strip()
+            if not v:
+                return []
+            if v.startswith("[") and v.endswith("]"):
+                import json
+
+                try:
+                    return [int(x) for x in json.loads(v)]
+                except Exception:
+                    pass
+            return [int(x.strip()) for x in v.split(",") if x.strip()]
+        if isinstance(v, (list, tuple, set)):
+            return [int(x) for x in v]
+        if isinstance(v, int):
+            return [v]
+        return []
 
     # Webhook server configuration (used in webhook mode)
     TELEGRAM_WEBHOOK_URL: str | None = Field(

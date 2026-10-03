@@ -157,3 +157,28 @@ async def test_check_account_status_api(client: AsyncClient) -> None:
         assert data["telegram_user_id"] == 555666777
         assert data["username"] == "api_worker_bot"
         assert data["is_premium"] is True
+
+
+@pytest.mark.asyncio
+async def test_check_all_accounts_api(client: AsyncClient) -> None:
+    """Test POST /api/v1/accounts/check-all endpoint."""
+    with patch(
+        "app.modules.accounts.service.check_all_accounts",
+        new=AsyncMock(
+            return_value={
+                "total": 3,
+                "active": 2,
+                "revoked": 1,
+                "banned": 0,
+                "flood_wait": 0,
+                "error": 0,
+            }
+        ),
+    ):
+        response = await client.post("/api/v1/accounts/check-all")
+        assert response.status_code == 200
+        data = response.json()
+        assert data["total"] == 3
+        assert data["active"] == 2
+        assert data["revoked"] == 1
+        assert data["banned"] == 0

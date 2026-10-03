@@ -289,3 +289,22 @@ class PhoneSignInResponse(BaseModel):
         default=None,
         description="Phone code hash if 2FA is needed",
     )
+
+
+class CheckAllAccountsResponse(BaseModel):
+    """Aggregated results of batch account health verification."""
+
+    total: int = Field(description="Total non-disabled accounts scanned")
+    active: int = Field(
+        default=0, description="Number of currently active/authorized accounts"
+    )
+    revoked: int = Field(
+        default=0, description="Number of revoked or unauthorized sessions"
+    )
+    banned: int = Field(default=0, description="Number of banned accounts")
+    flood_wait: int = Field(
+        default=0, description="Number of accounts under flood wait"
+    )
+    error: int = Field(
+        default=0, description="Number of accounts that produced an error"
+    )

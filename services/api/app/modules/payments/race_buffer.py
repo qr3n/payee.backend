@@ -108,7 +108,7 @@ async def finish_race(
     )
     done_event = f"event: done\ndata: {done_payload}\n\n"
 
-    pipe = redis.pipeline(transaction=False)
+    pipe = redis.pipeline(transaction=True)
     pipe.set(_status_key(batch_id), status, ex=RACE_BUFFER_TTL_SEC)
     pipe.rpush(_events_key(batch_id), done_event)
     pipe.expire(_events_key(batch_id), RACE_BUFFER_TTL_SEC)

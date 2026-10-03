@@ -2,10 +2,14 @@ import asyncio
 from collections.abc import AsyncGenerator
 from contextlib import asynccontextmanager, suppress
 
-from fastapi import FastAPI
+from fastapi import Depends, FastAPI, Response
 from fastapi.middleware.cors import CORSMiddleware
 from prometheus_fastapi_instrumentator import Instrumentator
+from redis.asyncio import Redis
+from sqlmodel.ext.asyncio.session import AsyncSession
 
+from app.api.deps import get_db
+from app.api.deps import get_redis as get_redis_dep
 from app.api.v1.router import api_v1_router
 from app.core.broker import broker
 from app.core.config import settings
@@ -16,6 +20,7 @@ from app.core.middleware import RequestIDMiddleware
 from app.core.redis import close_redis, get_redis
 from app.modules.accounts.session_pool import telegram_session_pool
 from app.modules.health import HealthCheckResponse
+from app.modules.health.schemas import ReadinessResponse
 
 logger = get_logger(__name__)
 
@@ -92,7 +97,15 @@ async def lifespan(_app: FastAPI) -> AsyncGenerator[None, None]:
         bg_task.cancel()
         with suppress(asyncio.CancelledError):
             await bg_task
-    # Shutdown actions: gracefully close broker, database connections and redis pool
+    # Shutdown actions: gracefully close active races, broker,
+    # database connections, and redis pool
+    try:
+        from app.modules.payments.service import shutdown_active_races
+
+        await shutdown_active_races()
+    except Exception as e:
+        logger.warning("Error during active races shutdown", error=str(e))
+
     if not broker.is_worker_process:
         await broker.shutdown()
     await async_engine.dispose()
@@ -159,6 +172,23 @@ async def root_health() -> HealthCheckResponse:
         version=settings.VERSION,
         environment=settings.ENVIRONMENT,
     )
+
+
+@app.get(
+    "/ready",
+    response_model=ReadinessResponse,
+    tags=["Health"],
+    summary="Root Service Readiness Probe",
+    description="Validates active connectivity to both PostgreSQL and Redis.",
+)
+async def root_ready(
+    response: Response,
+    db: AsyncSession = Depends(get_db),
+    redis: Redis = Depends(get_redis_dep),
+) -> ReadinessResponse:
+    from app.modules.health.router import check_readiness
+
+    return await check_readiness(response=response, db=db, redis=redis)
 
 
 # Include API routers

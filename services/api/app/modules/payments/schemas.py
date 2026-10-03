@@ -39,6 +39,9 @@ class PaymentRead(SQLModel):
     batch_id: UUID | None = Field(
         default=None, description="Race batch ID (groups multiple scenario results)"
     )
+    idempotency_key: str | None = Field(
+        default=None, description="Client idempotency key"
+    )
     scenario_id: str = Field(description="Executed payment scenario ID")
     amount: Decimal = Field(description="Payment amount")
     currency: str = Field(description="Payment currency")

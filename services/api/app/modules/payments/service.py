@@ -4,12 +4,15 @@ Provides reactive account acquisition, 30m TTL locks, user re-use,
 and scenario dispatch. Follows Unit of Work: NEVER calls session.commit().
 """
 
+import asyncio
+import json
 import time
-from collections.abc import Sequence
+from collections.abc import AsyncGenerator, Sequence
 from datetime import UTC, datetime, timedelta
 from typing import Any
 from uuid import UUID
 
+import uuid6
 from sqlmodel import col, func, select
 from sqlmodel.ext.asyncio.session import AsyncSession
 
@@ -22,7 +25,11 @@ from app.modules.payments.scenarios import (
     ScenarioContext,
     scenario_registry,
 )
-from app.modules.payments.schemas import PaymentCallback, PaymentCreate
+from app.modules.payments.schemas import (
+    PaymentCallback,
+    PaymentCreate,
+    PaymentRaceCreate,
+)
 from app.shared.pagination import PageParams
 
 logger = get_logger(__name__)
@@ -476,3 +483,306 @@ async def refresh_idle_account_scenarios(
         "refreshed_count": len(refreshed),
         "refreshed": refreshed,
     }
+
+
+async def acquire_N_free_accounts(
+    session: AsyncSession,
+    now: datetime,
+    n: int,
+) -> list[TelegramAccount]:
+    """
+    Acquire up to N free Telegram accounts (not locked by active payments).
+    Returns the least-recently-used accounts first.
+    """
+    active_locked_account_ids = (
+        select(Payment.account_id)
+        .where(
+            Payment.status == PaymentStatus.PENDING,
+            Payment.expires_at > now,
+        )
+        .scalar_subquery()
+    )
+
+    statement = (
+        select(TelegramAccount)
+        .where(
+            TelegramAccount.status == AccountStatus.ACTIVE,
+            col(TelegramAccount.id).not_in(active_locked_account_ids),
+        )
+        .order_by(col(TelegramAccount.updated_at).asc())
+        .limit(n)
+    )
+    result = await session.exec(statement)
+    return list(result.all())
+
+
+async def _run_race_scenario_task(
+    account: TelegramAccount,
+    scenario_id: str,
+    batch_id: UUID,
+    race_in: PaymentRaceCreate,
+    expires_at: datetime,
+    race_start: float,
+) -> str:
+    """
+    Run a single scenario for the race. Each task owns its own DB session.
+    Returns an SSE-formatted 'event: payment\\ndata: {...}\\n\\n' string on success.
+    Raises on failure so asyncio.as_completed can propagate it.
+    """
+    from app.core.db import async_session_maker
+    from app.modules.payments.scenarios.registry import (
+        scenario_registry as _registry,
+    )
+
+    scenario = _registry.get(scenario_id)
+    if not scenario:
+        raise ValueError(f"Scenario {scenario_id!r} not found in registry")
+
+    ctx = ScenarioContext(
+        client_user_id=race_in.client_user_id,
+        amount=race_in.amount,
+        currency=race_in.currency,
+        account=account,
+        meta=race_in.meta,
+    )
+
+    result = await scenario.create_payment(ctx)
+
+    # SBP resolution
+    t_resolve_start = time.perf_counter()
+    resolved_link, is_resolved = await resolve_sbp_link(result.payment_link)
+    resolve_duration = round(time.perf_counter() - t_resolve_start, 2)
+
+    generation_time_sec = round(time.perf_counter() - race_start, 2)
+
+    scenario_stages = list(result.meta.get("stage_timings", []))
+    all_stages = [*scenario_stages]
+    if is_resolved:
+        all_stages.append(
+            {
+                "stage": "resolve_sbp_link",
+                "description": "Извлечение прямой ссылки СБП (НСПК)",
+                "duration_sec": resolve_duration,
+            }
+        )
+    elif "gate.antilopay.com" in (result.payment_link or "") or "cardlink.link" in (
+        result.payment_link or ""
+    ):
+        all_stages.append(
+            {
+                "stage": "resolve_sbp_link",
+                "description": "Попытка извлечения ссылки СБП (оставлен оригинал)",
+                "duration_sec": resolve_duration,
+            }
+        )
+
+    merged_meta = {
+        **race_in.meta,
+        **result.meta,
+        "original_payment_link": result.payment_link,
+        "resolved_sbp_link": resolved_link if is_resolved else None,
+        "is_sbp_resolved": is_resolved,
+        "generation_time_sec": generation_time_sec,
+        "stage_timings": all_stages,
+        "batch_id": str(batch_id),
+    }
+
+    # Persist payment record (own session + own commit — SSE lifecycle exception)
+    payment: Payment
+    async with async_session_maker() as task_session:
+        try:
+            payment = Payment(
+                client_user_id=race_in.client_user_id,
+                scenario_id=scenario_id,
+                amount=race_in.amount,
+                currency=race_in.currency,
+                account_id=account.id,
+                batch_id=batch_id,
+                status=PaymentStatus.PENDING,
+                payment_link=resolved_link,
+                expires_at=expires_at,
+                meta=merged_meta,
+            )
+            task_session.add(payment)
+            await task_session.flush()
+            await task_session.refresh(payment)
+            await task_session.commit()
+        except Exception:
+            await task_session.rollback()
+            raise
+
+    # Trigger warmup for next use (non-blocking, best-effort)
+    try:
+        from app.modules.payments.tasks import dispatch_single_scenario_warmup
+
+        await dispatch_single_scenario_warmup(
+            account_id=account.id,
+            scenario_id=scenario_id,
+        )
+    except Exception as exc:
+        logger.warning(
+            "failed_dispatching_post_race_warmup",
+            account_id=str(account.id),
+            scenario_id=scenario_id,
+            error=str(exc),
+        )
+
+    event_payload = {
+        "batch_id": str(batch_id),
+        "payment_id": str(payment.id),
+        "scenario_id": scenario_id,
+        "payment_link": resolved_link,
+        "is_sbp_resolved": is_resolved,
+        "generation_time_sec": generation_time_sec,
+        "stage_timings": all_stages,
+    }
+    return f"event: payment\ndata: {json.dumps(event_payload, ensure_ascii=False)}\n\n"
+
+
+async def create_payment_race_generator(
+    race_in: PaymentRaceCreate,
+) -> AsyncGenerator[str, None]:
+    """
+    Async generator for SSE payment race.
+
+    Acquires up to N free accounts (one per registered scenario), locks them via
+    PENDING stub payments, then runs all scenarios concurrently. Yields each
+    successful result as it arrives. Cancels remaining tasks after timeout.
+
+    SSE event types:
+      - 'started'  — emitted immediately with batch_id and scenario count
+      - 'payment'  — emitted for each successful scenario result
+      - 'error'    — emitted for each failed scenario
+      - 'done'     — emitted when all tasks have resolved or timed out
+    """
+    from app.core.db import async_session_maker
+
+    race_start = time.perf_counter()
+    now = datetime.now(UTC)
+    expires_at = now + timedelta(minutes=PAYMENT_TTL_MINUTES)
+    batch_id: UUID = uuid6.uuid7()
+    scenarios = scenario_registry.list()
+    num_scenarios = len(scenarios)
+
+    # Acquire free accounts (one per scenario, up to num_scenarios)
+    async with async_session_maker() as setup_session:
+        try:
+            free_accounts = await acquire_N_free_accounts(
+                setup_session, now, n=num_scenarios
+            )
+
+            if not free_accounts:
+                err_data = json.dumps(
+                    {
+                        "error": "no_accounts_available",
+                        "message": "Нет свободных аккаунтов",
+                    },
+                    ensure_ascii=False,
+                )
+                yield f"event: error\ndata: {err_data}\n\n"
+                done_data = json.dumps(
+                    {"total": 0, "succeeded": 0, "failed": 0},
+                    ensure_ascii=False,
+                )
+                yield f"event: done\ndata: {done_data}\n\n"
+                return
+
+            # Build (account, scenario_id) pairs
+            pairs: list[tuple[TelegramAccount, str]] = [
+                (account, scenario.scenario_id)
+                for account, scenario in zip(free_accounts, scenarios, strict=False)
+            ]
+
+            # Lock accounts by creating PENDING stub payments
+            for account, scenario_id in pairs:
+                stub = Payment(
+                    client_user_id=race_in.client_user_id,
+                    scenario_id=scenario_id,
+                    amount=race_in.amount,
+                    currency=race_in.currency,
+                    account_id=account.id,
+                    batch_id=batch_id,
+                    status=PaymentStatus.PENDING,
+                    payment_link=None,
+                    expires_at=expires_at,
+                    meta={"batch_id": str(batch_id), "race_stub": True},
+                )
+                setup_session.add(stub)
+
+            await setup_session.commit()
+        except Exception:
+            await setup_session.rollback()
+            raise
+
+    started_data = json.dumps(
+        {"batch_id": str(batch_id), "scenarios": [s for _, s in pairs]},
+        ensure_ascii=False,
+    )
+    yield f"event: started\ndata: {started_data}\n\n"
+
+    # Launch all scenario tasks concurrently
+    tasks = [
+        asyncio.create_task(
+            _run_race_scenario_task(
+                account=account,
+                scenario_id=scenario_id,
+                batch_id=batch_id,
+                race_in=race_in,
+                expires_at=expires_at,
+                race_start=race_start,
+            )
+        )
+        for account, scenario_id in pairs
+    ]
+
+    succeeded = 0
+    failed = 0
+
+    try:
+        for fut in asyncio.as_completed(tasks, timeout=race_in.timeout_sec):
+            try:
+                sse_event = await fut
+                succeeded += 1
+                yield sse_event
+            except Exception as exc:
+                failed += 1
+                logger.error(
+                    "race_scenario_task_failed",
+                    batch_id=str(batch_id),
+                    error=str(exc),
+                )
+                err_payload = json.dumps(
+                    {"error": "scenario_failed", "message": str(exc)},
+                    ensure_ascii=False,
+                )
+                yield f"event: error\ndata: {err_payload}\n\n"
+    except TimeoutError:
+        logger.warning(
+            "race_timed_out",
+            batch_id=str(batch_id),
+            timeout_sec=race_in.timeout_sec,
+            succeeded=succeeded,
+        )
+        for task in tasks:
+            task.cancel()
+        timeout_payload = json.dumps(
+            {
+                "error": "timeout",
+                "message": f"Таймаут {race_in.timeout_sec}с достигнут",
+            },
+            ensure_ascii=False,
+        )
+        yield f"event: error\ndata: {timeout_payload}\n\n"
+
+    total_duration = round(time.perf_counter() - race_start, 2)
+    done_payload = json.dumps(
+        {
+            "batch_id": str(batch_id),
+            "total": len(pairs),
+            "succeeded": succeeded,
+            "failed": failed,
+            "duration_sec": total_duration,
+        },
+        ensure_ascii=False,
+    )
+    yield f"event: done\ndata: {done_payload}\n\n"

@@ -5,6 +5,7 @@ FastAPI router endpoints for creating, managing, and reacting to payments.
 from uuid import UUID
 
 from fastapi import APIRouter, Depends, status
+from fastapi.responses import StreamingResponse
 from sqlmodel.ext.asyncio.session import AsyncSession
 
 from app.api.deps import get_db
@@ -15,6 +16,7 @@ from app.modules.payments.scenarios import scenario_registry
 from app.modules.payments.schemas import (
     PaymentCallback,
     PaymentCreate,
+    PaymentRaceCreate,
     PaymentRead,
     ScenarioRead,
 )
@@ -41,6 +43,40 @@ async def create_payment(
     """Create a new payment transaction."""
     payment = await payment_service.create_payment(session=db, payment_in=payment_in)
     return PaymentRead.model_validate(payment)
+
+
+@router.post(
+    "/race",
+    summary="Race all scenarios (SSE)",
+    description=(
+        "Runs all registered bot scenarios concurrently against all "
+        "available accounts. Streams each successful payment link as a "
+        "Server-Sent Event (SSE) as it is generated.\n\n"
+        "SSE event types:\n"
+        "- started: accounts locked\n"
+        "- payment: link generated\n"
+        "- error: scenario failed\n"
+        "- done: race completed\n"
+    ),
+    response_class=StreamingResponse,
+    responses={200: {"content": {"text/event-stream": {}}}},
+)
+async def create_payment_race(
+    race_in: PaymentRaceCreate,
+) -> StreamingResponse:
+    """
+    Concurrent multi-scenario payment race endpoint (SSE).
+    Does not use get_db — sessions are managed manually inside the generator
+    because SSE responses are incompatible with FastAPI's request lifecycle.
+    """
+    return StreamingResponse(
+        payment_service.create_payment_race_generator(race_in),
+        media_type="text/event-stream",
+        headers={
+            "Cache-Control": "no-cache",
+            "X-Accel-Buffering": "no",  # Disable Nginx buffering for SSE
+        },
+    )
 
 
 @router.get(

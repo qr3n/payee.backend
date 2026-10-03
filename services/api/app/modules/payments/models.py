@@ -69,6 +69,11 @@ class Payment(PaymentBase, BaseUUIDModel, table=True):
         ),
         description="Telegram account reserved for creating this payment",
     )
+    batch_id: UUID | None = Field(
+        default=None,
+        index=True,
+        description="Groups all Payment records originating from a single race request",
+    )
     status: PaymentStatus = Field(
         default=PaymentStatus.PENDING,
         sa_column=Column(

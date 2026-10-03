@@ -36,6 +36,9 @@ class PaymentRead(SQLModel):
     account_id: UUID | None = Field(
         default=None, description="Assigned Telegram account ID"
     )
+    batch_id: UUID | None = Field(
+        default=None, description="Race batch ID (groups multiple scenario results)"
+    )
     scenario_id: str = Field(description="Executed payment scenario ID")
     amount: Decimal = Field(description="Payment amount")
     currency: str = Field(description="Payment currency")
@@ -72,3 +75,53 @@ class ScenarioRead(BaseModel):
     scenario_id: str = Field(description="Unique scenario identifier")
     name: str = Field(description="Human-readable scenario title")
     description: str = Field(description="Scenario description")
+
+
+class PaymentRaceCreate(BaseModel):
+    """Input payload for initiating a concurrent multi-scenario payment race."""
+
+    client_user_id: str = Field(
+        min_length=1,
+        max_length=128,
+        description="External client/user identifier requesting the payment",
+        examples=["user_987654"],
+    )
+    amount: Decimal = Field(
+        gt=0,
+        description="Monetary amount (must be positive)",
+        examples=["500.00"],
+    )
+    currency: str = Field(
+        default="RUB",
+        max_length=16,
+        description="Currency code (e.g. RUB, USDT, USD)",
+        examples=["RUB"],
+    )
+    timeout_sec: float = Field(
+        default=120.0,
+        gt=0,
+        le=300.0,
+        description="Maximum seconds to wait for all scenarios to complete",
+        examples=[120.0],
+    )
+    meta: dict[str, Any] = Field(
+        default_factory=dict,
+        description="Additional scenario-specific arguments",
+        examples=[{}],
+    )
+
+
+class PaymentRaceEvent(BaseModel):
+    """Single SSE event emitted as each scenario completes during a race."""
+
+    batch_id: UUID = Field(description="Shared batch UUID grouping all race payments")
+    payment_id: UUID = Field(description="Individual payment UUID")
+    scenario_id: str = Field(description="Scenario that generated this link")
+    payment_link: str = Field(description="Generated payment/invoice URL")
+    is_sbp_resolved: bool = Field(description="Whether link was resolved to NSPK SBP")
+    generation_time_sec: float = Field(
+        description="Total time from race start to this link"
+    )
+    stage_timings: list[dict[str, Any]] = Field(
+        default_factory=list, description="Per-stage timing breakdown"
+    )

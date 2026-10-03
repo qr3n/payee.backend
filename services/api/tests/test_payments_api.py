@@ -165,3 +165,33 @@ async def test_get_payment_not_found(client: AsyncClient) -> None:
     unknown_id = str(uuid4())
     resp = await client.get(f"/api/v1/payments/{unknown_id}")
     assert resp.status_code == 404
+
+
+@pytest.mark.asyncio
+async def test_create_payment_race_api_sse(
+    client: AsyncClient, db_session: AsyncSession
+) -> None:
+    """Test POST /api/v1/payments/race streams SSE events."""
+    await _create_test_account(db_session, "Race Account 1")
+
+    payload = {
+        "client_user_id": "race_payer_1",
+        "amount": "100.00",
+        "currency": "RUB",
+        "timeout_sec": 10.0,
+    }
+
+    response = await client.post("/api/v1/payments/race", json=payload)
+    assert response.status_code == 200
+    assert "text/event-stream" in response.headers.get("content-type", "")
+
+    events = response.text.strip().split("\n\n")
+    event_types = []
+    for ev in events:
+        lines = ev.split("\n")
+        for line in lines:
+            if line.startswith("event: "):
+                event_types.append(line.replace("event: ", "").strip())
+
+    assert "started" in event_types
+    assert "done" in event_types

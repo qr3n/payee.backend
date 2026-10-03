@@ -182,9 +182,12 @@ class StarsllyBotScenario(BasePaymentScenario):
             f"Ввод суммы ({stars_count} звёзд) [быстрый путь]",
         )
 
-        sbp_button = find_button_by_text(
-            method_prompt, "QR/СБП"
-        ) or find_button_by_text(method_prompt, "СБП")
+        sbp_button = (
+            find_button_by_text(method_prompt, "Запасной")
+            or find_button_by_text(method_prompt, "Резерв")
+            or find_button_by_text(method_prompt, "QR/СБП")
+            or find_button_by_text(method_prompt, "СБП")
+        )
         if not sbp_button:
             raise AppException(
                 message="Could not find 'QR/СБП' payment button in bot response.",
@@ -196,15 +199,21 @@ class StarsllyBotScenario(BasePaymentScenario):
         invoice_msg = await wait_for_bot_message(
             client=client,
             peer=bot_username,
-            predicate=lambda m: find_url_button(m) is not None,
-            timeout=10.0,
+            predicate=lambda m: (
+                find_url_button(m) is not None
+                or "поддержк" in (getattr(m, "text", "") or "").lower()
+                or "проблем" in (getattr(m, "text", "") or "").lower()
+                or "ошибк" in (getattr(m, "text", "") or "").lower()
+            ),
+            timeout=15.0,
         )
         timer.record_stage("select_sbp_method", "Выбор способа оплаты QR/СБП")
 
         url_button_info = find_url_button(invoice_msg)
         if not url_button_info:
+            err_text = getattr(invoice_msg, "text", "") or "No payment link"
             raise AppException(
-                message="Invoice message received without payment link button.",
+                message=f"Bot returned error instead of invoice link: {err_text}",
                 code="BOT_INTERACTION_ERROR",
                 status_code=502,
             )
@@ -269,6 +278,8 @@ class StarsllyBotScenario(BasePaymentScenario):
             predicate=lambda m: (
                 find_button_by_text(m, "Купить другу") is not None
                 or "покупка для" in (getattr(m, "text", "") or "").lower()
+                or "юзернейм" in (getattr(m, "text", "") or "").lower()
+                or "username" in (getattr(m, "text", "") or "").lower()
             ),
             timeout=15.0,
             min_id=buy_stars_msg.id,
@@ -276,24 +287,18 @@ class StarsllyBotScenario(BasePaymentScenario):
         timer.record_stage("open_stars_menu", "Команда «⭐️ Купить Звезды»")
 
         gift_friend_btn = find_button_by_text(stars_prompt, "Купить другу")
-        if not gift_friend_btn:
-            raise AppException(
-                message="Could not find 'Купить другу' button in bot response.",
-                code="BOT_INTERACTION_ERROR",
-                status_code=502,
+        if gift_friend_btn:
+            await click_button_fast(client, gift_friend_btn)
+            await wait_for_bot_message(
+                client=client,
+                peer=bot_username,
+                predicate=lambda m: (
+                    "юзернейм" in (getattr(m, "text", "") or "").lower()
+                    or "/cancel" in (getattr(m, "text", "") or "").lower()
+                ),
+                timeout=15.0,
             )
-        await click_button_fast(client, gift_friend_btn)
-
-        await wait_for_bot_message(
-            client=client,
-            peer=bot_username,
-            predicate=lambda m: (
-                "юзернейм" in (getattr(m, "text", "") or "").lower()
-                or "/cancel" in (getattr(m, "text", "") or "").lower()
-            ),
-            timeout=15.0,
-        )
-        timer.record_stage("select_gift_friend", "Кнопка «Купить другу»")
+            timer.record_stage("select_gift_friend", "Кнопка «Купить другу»")
 
         send_user_msg = await client.send_message(bot_username, recipient)
 
@@ -302,7 +307,7 @@ class StarsllyBotScenario(BasePaymentScenario):
             peer=bot_username,
             predicate=lambda m: (
                 "количество звезд" in (getattr(m, "text", "") or "").lower()
-                and "покупка для" in (getattr(m, "text", "") or "").lower()
+                or "покупка для" in (getattr(m, "text", "") or "").lower()
             ),
             timeout=15.0,
             min_id=send_user_msg.id,
@@ -324,9 +329,12 @@ class StarsllyBotScenario(BasePaymentScenario):
         )
         timer.record_stage("send_stars_count", f"Ввод суммы ({stars_count} звёзд)")
 
-        sbp_button = find_button_by_text(
-            method_prompt, "QR/СБП"
-        ) or find_button_by_text(method_prompt, "СБП")
+        sbp_button = (
+            find_button_by_text(method_prompt, "Запасной")
+            or find_button_by_text(method_prompt, "Резерв")
+            or find_button_by_text(method_prompt, "QR/СБП")
+            or find_button_by_text(method_prompt, "СБП")
+        )
         if not sbp_button:
             raise AppException(
                 message="Could not find 'QR/СБП' payment button in bot response.",
@@ -338,15 +346,21 @@ class StarsllyBotScenario(BasePaymentScenario):
         invoice_msg = await wait_for_bot_message(
             client=client,
             peer=bot_username,
-            predicate=lambda m: find_url_button(m) is not None,
+            predicate=lambda m: (
+                find_url_button(m) is not None
+                or "поддержк" in (getattr(m, "text", "") or "").lower()
+                or "проблем" in (getattr(m, "text", "") or "").lower()
+                or "ошибк" in (getattr(m, "text", "") or "").lower()
+            ),
             timeout=20.0,
         )
         timer.record_stage("select_sbp_method", "Выбор способа оплаты QR/СБП")
 
         url_button_info = find_url_button(invoice_msg)
         if not url_button_info:
+            err_text = getattr(invoice_msg, "text", "") or "No payment link"
             raise AppException(
-                message="Invoice message received without payment link button.",
+                message=f"Bot returned error instead of invoice link: {err_text}",
                 code="BOT_INTERACTION_ERROR",
                 status_code=502,
             )
@@ -423,25 +437,25 @@ class StarsllyBotScenario(BasePaymentScenario):
                 predicate=lambda m: (
                     find_button_by_text(m, "Купить другу") is not None
                     or "покупка для" in (getattr(m, "text", "") or "").lower()
+                    or "юзернейм" in (getattr(m, "text", "") or "").lower()
+                    or "username" in (getattr(m, "text", "") or "").lower()
                 ),
                 timeout=15.0,
                 min_id=buy_stars_msg.id,
             )
 
             gift_friend_btn = find_button_by_text(stars_prompt, "Купить другу")
-            if not gift_friend_btn:
-                raise AppException(message="No 'Купить другу' button in stars menu")
-            await click_button_fast(client, gift_friend_btn)
-
-            await wait_for_bot_message(
-                client=client,
-                peer=bot_username,
-                predicate=lambda m: (
-                    "юзернейм" in (getattr(m, "text", "") or "").lower()
-                    or "/cancel" in (getattr(m, "text", "") or "").lower()
-                ),
-                timeout=15.0,
-            )
+            if gift_friend_btn:
+                await click_button_fast(client, gift_friend_btn)
+                await wait_for_bot_message(
+                    client=client,
+                    peer=bot_username,
+                    predicate=lambda m: (
+                        "юзернейм" in (getattr(m, "text", "") or "").lower()
+                        or "/cancel" in (getattr(m, "text", "") or "").lower()
+                    ),
+                    timeout=15.0,
+                )
 
             send_user_msg = await client.send_message(bot_username, recipient)
 
@@ -450,7 +464,7 @@ class StarsllyBotScenario(BasePaymentScenario):
                 peer=bot_username,
                 predicate=lambda m: (
                     "количество звезд" in (getattr(m, "text", "") or "").lower()
-                    and "покупка для" in (getattr(m, "text", "") or "").lower()
+                    or "покупка для" in (getattr(m, "text", "") or "").lower()
                 ),
                 timeout=15.0,
                 min_id=send_user_msg.id,

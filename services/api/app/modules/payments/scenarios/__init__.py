@@ -28,10 +28,13 @@ from app.modules.payments.scenarios.starslly_scenario import (
     StarsllyBotScenario,
 )
 from app.modules.payments.scenarios.state import (
+    AcquiredAccount,
+    GenerationLease,
     acquire_account_generation_lock,
     acquire_scenario_pending_lock,
     acquire_scenario_stars_reservation,
     clear_scenario_prepared,
+    extend_account_generation_lock,
     is_account_generation_locked,
     is_scenario_pending_locked,
     is_scenario_prepared,
@@ -45,7 +48,9 @@ from app.modules.payments.scenarios.state import (
 )
 
 __all__ = [
+    "AcquiredAccount",
     "BasePaymentScenario",
+    "GenerationLease",
     "HelperStarsBotScenario",
     "MockBotScenario",
     "PreparationResult",
@@ -61,6 +66,7 @@ __all__ = [
     "allocate_unique_stars_for_scenario",
     "calculate_stars_from_amount",
     "clear_scenario_prepared",
+    "extend_account_generation_lock",
     "is_account_generation_locked",
     "is_scenario_pending_locked",
     "is_scenario_prepared",

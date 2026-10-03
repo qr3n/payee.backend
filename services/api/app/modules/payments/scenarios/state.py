@@ -6,7 +6,8 @@ Implements fail-closed distributed locks with owner tokens and Lua release scrip
 """
 
 import json
-from typing import Any
+from dataclasses import dataclass
+from typing import TYPE_CHECKING, Any
 from uuid import UUID
 
 import uuid6
@@ -14,9 +15,29 @@ import uuid6
 from app.core.logging import get_logger
 from app.core.redis import get_redis
 
+if TYPE_CHECKING:
+    from app.modules.accounts.models import TelegramAccount
+
 logger = get_logger(__name__)
 
 DEFAULT_PREPARATION_TTL_SECONDS = 900  # 15 minutes
+
+
+@dataclass(frozen=True, slots=True)
+class GenerationLease:
+    """Distributed lock lease token holding exclusive ownership of an account."""
+
+    account_id: UUID
+    owner_token: str
+
+
+@dataclass(slots=True)
+class AcquiredAccount:
+    """Account coupled with its exclusive generation lease."""
+
+    account: "TelegramAccount"
+    lease: GenerationLease
+
 
 # Atomic Lua release script: deletes key ONLY if its value matches the owner token
 LUA_RELEASE_LOCK = """
@@ -70,29 +91,45 @@ async def is_scenario_prepared(
     account_id: UUID | str,
     scenario_id: str,
     expected_recipient: str | None = None,
+    expected_bot_username: str | None = None,
+    expected_fingerprint: str | None = None,
 ) -> bool:
     """
     Check if the account's dialog with the scenario bot is ready for amount input.
-    If expected_recipient is provided, verifies that dialog was prepared
-    for that exact recipient.
+    Validates status, recipient, bot username, and connection fingerprint.
     """
     ctx = await get_scenario_prepared_context(account_id, scenario_id)
-    if not ctx or ctx.get("status") != "ready_for_amount":
+    if not ctx or not isinstance(ctx, dict) or ctx.get("status") != "ready_for_amount":
         return False
+
+    if expected_bot_username is not None:
+        stored_bot = ctx.get("bot_username")
+        if stored_bot:
+            norm_exp_bot = expected_bot_username.lstrip("@").lower()
+            norm_act_bot = str(stored_bot).lstrip("@").lower()
+            if norm_exp_bot != norm_act_bot:
+                return False
+
+    if expected_fingerprint is not None:
+        stored_fp = ctx.get("fingerprint")
+        if stored_fp and stored_fp != expected_fingerprint:
+            return False
 
     if expected_recipient is not None:
         stored_recipient = ctx.get("recipient")
-        if stored_recipient is not None:
+        # For scenarios where recipient is entered during warmup,
+        # missing stored recipient is a cache miss
+        if scenario_id in ("helperstars_bot", "starslly_bot"):
+            if not stored_recipient:
+                return False
             norm_expected = expected_recipient.lstrip("@").lower()
             norm_stored = str(stored_recipient).lstrip("@").lower()
             if norm_expected != norm_stored:
-                logger.info(
-                    "prepared_scenario_recipient_mismatch",
-                    account_id=str(account_id),
-                    scenario_id=scenario_id,
-                    expected=norm_expected,
-                    stored=norm_stored,
-                )
+                return False
+        elif stored_recipient is not None:
+            norm_expected = expected_recipient.lstrip("@").lower()
+            norm_stored = str(stored_recipient).lstrip("@").lower()
+            if norm_expected != norm_stored:
                 return False
 
     return True
@@ -178,31 +215,45 @@ async def acquire_account_generation_lock(
         return None
 
 
-async def _eval_release_lock(redis: Any, key: str, owner_token: str | None) -> bool:
-    if owner_token is not None:
-        try:
-            res = await redis.eval(LUA_RELEASE_LOCK, 1, key, owner_token)
-            return bool(res)
-        except Exception:
-            # Fallback for fake/mock redis environments that lack Lua eval
-            val = await redis.get(key)
-            if val is not None:
-                val_str = val.decode("utf-8") if isinstance(val, bytes) else str(val)
-                if val_str == str(owner_token):
-                    await redis.delete(key)
-                    return True
-            return False
-    await redis.delete(key)
-    return True
+async def _eval_release_lock(redis: Any, key: str, owner_token: str) -> bool:
+    """Atomically release key only if current value matches owner_token via Lua."""
+    if not owner_token:
+        raise ValueError(
+            "owner_token is strictly required to release distributed lock safely"
+        )
+    res = await redis.eval(LUA_RELEASE_LOCK, 1, key, owner_token)
+    return bool(res)
+
+
+async def extend_account_generation_lock(
+    account_id: UUID | str,
+    owner_token: str,
+    ttl_seconds: int = 90,
+) -> bool:
+    """Atomically extend generation lock TTL if owned by owner_token."""
+    if not owner_token:
+        raise ValueError("owner_token is strictly required to extend lock safely")
+    try:
+        redis = get_redis()
+        key = _generation_lock_key(account_id)
+        res = await redis.eval(LUA_EXTEND_LOCK, 1, key, owner_token, ttl_seconds)
+        return bool(res)
+    except Exception as exc:
+        logger.warning(
+            "failed_extending_account_generation_lock",
+            account_id=str(account_id),
+            error=str(exc),
+        )
+        return False
 
 
 async def release_account_generation_lock(
     account_id: UUID | str,
-    owner_token: str | None = None,
+    owner_token: str,
 ) -> bool:
     """
     Release the generation lock.
-    If owner_token is specified, verifies ownership before deletion.
+    Verifies ownership via owner_token before deletion.
     """
     try:
         redis = get_redis()
@@ -278,7 +329,7 @@ async def acquire_scenario_stars_reservation(
 async def release_scenario_stars_reservation(
     scenario_id: str,
     stars_count: int,
-    owner_token: str | None = None,
+    owner_token: str,
 ) -> bool:
     """Release a reserved stars count for a scenario."""
     try:
@@ -350,7 +401,7 @@ async def acquire_scenario_pending_lock(
 async def release_scenario_pending_lock(
     scenario_id: str,
     account_id: UUID | str,
-    owner_token: str | None = None,
+    owner_token: str,
 ) -> bool:
     """Release pending reservation for a scenario on an account."""
     try:

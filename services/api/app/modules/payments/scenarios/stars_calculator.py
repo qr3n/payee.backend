@@ -4,7 +4,7 @@ Converts arbitrary monetary amounts into Telegram Stars integer counts.
 Validates monetary boundaries and safely allocates unique reservation deltas.
 """
 
-from decimal import Decimal
+from decimal import Decimal, InvalidOperation
 
 from app.core.config import settings
 from app.core.exceptions import AppException
@@ -61,7 +61,23 @@ def calculate_stars_from_amount(
             status_code=422,
         )
 
-    applied_rate = Decimal(str(rate or settings.STARS_CALCULATION_RATE))
+    raw_rate = settings.STARS_CALCULATION_RATE if rate is None else rate
+    try:
+        applied_rate = Decimal(str(raw_rate))
+    except (InvalidOperation, ValueError, TypeError) as exc:
+        raise AppException(
+            message="Rate must be a positive finite number.",
+            code="INVALID_RATE",
+            status_code=422,
+        ) from exc
+
+    if not applied_rate.is_finite() or applied_rate <= Decimal("0"):
+        raise AppException(
+            message="Rate must be a positive finite number.",
+            code="INVALID_RATE",
+            status_code=422,
+        )
+
     calculated_stars = int(amount * applied_rate)
 
     if calculated_stars < MIN_STARS_AMOUNT or calculated_stars > MAX_STARS_AMOUNT:

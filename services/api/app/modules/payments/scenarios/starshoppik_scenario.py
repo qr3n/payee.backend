@@ -90,9 +90,17 @@ class StarShoppikBotScenario(BasePaymentScenario):
             client = await telegram_session_pool.get_connected_client(ctx.account)
             timer.record_stage("connect_session", "Подключение сессии из пула")
 
+            from app.modules.accounts.session_pool import compute_account_fingerprint
+
+            acc_fp = compute_account_fingerprint(ctx.account)
+
             # Check if chat is pre-warmed / waiting for amount
             is_prep = await is_scenario_prepared(
-                ctx.account.id, self.scenario_id, expected_recipient=recipient
+                ctx.account.id,
+                self.scenario_id,
+                expected_recipient=recipient,
+                expected_bot_username=bot_username,
+                expected_fingerprint=acc_fp,
             )
             if is_prep:
                 try:
@@ -534,10 +542,17 @@ class StarShoppikBotScenario(BasePaymentScenario):
                 timeout=15.0,
             )
 
+            from app.modules.accounts.session_pool import compute_account_fingerprint
+
+            acc_fp = compute_account_fingerprint(account)
             await set_scenario_prepared(
                 account.id,
                 self.scenario_id,
-                context={"recipient": None, "bot_username": bot_username},
+                context={
+                    "recipient": None,
+                    "bot_username": bot_username,
+                    "fingerprint": acc_fp,
+                },
             )
             logger.info("starshoppik_prepare_completed", account_id=str(account.id))
             return PreparationResult(status="ok")

@@ -333,3 +333,79 @@ async def test_helperstars_scenario_prepare() -> None:
         mock_join.assert_awaited_once()
         mock_client.send_message.assert_awaited_once()
         mock_click.assert_awaited_once_with(mock_client, btn_lang)
+
+
+@pytest.mark.asyncio
+async def test_helperstars_fast_path_validation() -> None:
+    """Test cache validation for recipient, bot_username, and fingerprint."""
+    from uuid import uuid4
+
+    from app.modules.payments.scenarios.state import (
+        is_scenario_prepared,
+        set_scenario_prepared,
+    )
+
+    acc_id = uuid4()
+
+    # 1. Prepared without recipient -> cache miss for helperstars
+    await set_scenario_prepared(
+        acc_id,
+        "helperstars_bot",
+        context={
+            "recipient": None,
+            "bot_username": "helperstars_bot",
+            "fingerprint": "fp1",
+        },
+    )
+    assert not await is_scenario_prepared(
+        acc_id,
+        "helperstars_bot",
+        expected_recipient="@target_user",
+        expected_bot_username="helperstars_bot",
+        expected_fingerprint="fp1",
+    )
+
+    # 2. Prepared with different recipient -> cache miss
+    await set_scenario_prepared(
+        acc_id,
+        "helperstars_bot",
+        context={
+            "recipient": "@alice",
+            "bot_username": "helperstars_bot",
+            "fingerprint": "fp1",
+        },
+    )
+    assert not await is_scenario_prepared(
+        acc_id,
+        "helperstars_bot",
+        expected_recipient="@bob",
+        expected_bot_username="helperstars_bot",
+        expected_fingerprint="fp1",
+    )
+
+    # 3. Prepared with different bot_username -> cache miss
+    assert not await is_scenario_prepared(
+        acc_id,
+        "helperstars_bot",
+        expected_recipient="@alice",
+        expected_bot_username="other_bot",
+        expected_fingerprint="fp1",
+    )
+
+    # 4. Prepared with different fingerprint -> cache miss
+    assert not await is_scenario_prepared(
+        acc_id,
+        "helperstars_bot",
+        expected_recipient="@alice",
+        expected_bot_username="helperstars_bot",
+        expected_fingerprint="fp2",
+    )
+
+    # 5. Matching all three -> cache hit!
+    assert await is_scenario_prepared(
+        acc_id,
+        "helperstars_bot",
+        expected_recipient="@alice",
+        expected_bot_username="helperstars_bot",
+        expected_fingerprint="fp1",
+    )

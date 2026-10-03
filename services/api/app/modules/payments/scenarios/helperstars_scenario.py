@@ -75,10 +75,13 @@ class HelperStarsBotScenario(BasePaymentScenario):
             currency=ctx.currency,
             rate=ctx.meta.get("rate"),
         )
-        stars_count, stars_delta = await allocate_unique_stars_for_scenario(
+        allocated = await allocate_unique_stars_for_scenario(
             scenario_id=self.scenario_id,
             base_stars=base_stars,
         )
+        stars_count = allocated.stars
+        stars_delta = allocated.delta
+        reservation_token = allocated.token
 
         timer = StageTimer()
         client: TelegramClient | None = None
@@ -96,9 +99,17 @@ class HelperStarsBotScenario(BasePaymentScenario):
             client = await telegram_session_pool.get_connected_client(ctx.account)
             timer.record_stage("connect_session", "Подключение сессии из пула")
 
+            from app.modules.accounts.session_pool import compute_account_fingerprint
+
+            acc_fp = compute_account_fingerprint(ctx.account)
+
             # Check if chat is pre-warmed / waiting for amount
             is_prep = await is_scenario_prepared(
-                ctx.account.id, self.scenario_id, expected_recipient=recipient
+                ctx.account.id,
+                self.scenario_id,
+                expected_recipient=recipient,
+                expected_bot_username=bot_username,
+                expected_fingerprint=acc_fp,
             )
             if is_prep:
                 try:
@@ -118,6 +129,7 @@ class HelperStarsBotScenario(BasePaymentScenario):
                     await clear_scenario_prepared(ctx.account.id, self.scenario_id)
                     res.meta["base_stars_count"] = base_stars
                     res.meta["stars_delta"] = stars_delta
+                    res.meta["stars_reservation_token"] = reservation_token
                     return res
                 except Exception as exc:
                     logger.warning(
@@ -144,13 +156,18 @@ class HelperStarsBotScenario(BasePaymentScenario):
             await clear_scenario_prepared(ctx.account.id, self.scenario_id)
             res.meta["base_stars_count"] = base_stars
             res.meta["stars_delta"] = stars_delta
+            res.meta["stars_reservation_token"] = reservation_token
             return res
 
         except AppException:
-            await release_scenario_stars_reservation(self.scenario_id, stars_count)
+            await release_scenario_stars_reservation(
+                self.scenario_id, stars_count, owner_token=reservation_token
+            )
             raise
         except TimeoutError as e:
-            await release_scenario_stars_reservation(self.scenario_id, stars_count)
+            await release_scenario_stars_reservation(
+                self.scenario_id, stars_count, owner_token=reservation_token
+            )
             logger.error("HelperStars bot interaction timed out", error=str(e))
             raise AppException(
                 message=f"Timeout waiting for response from @{bot_username}: {e}",
@@ -158,7 +175,9 @@ class HelperStarsBotScenario(BasePaymentScenario):
                 status_code=504,
             ) from e
         except Exception as e:
-            await release_scenario_stars_reservation(self.scenario_id, stars_count)
+            await release_scenario_stars_reservation(
+                self.scenario_id, stars_count, owner_token=reservation_token
+            )
             logger.error("Unexpected error in HelperStars scenario", error=str(e))
             raise AppException(
                 message=f"Failed to generate payment link via @{bot_username}: {e}",

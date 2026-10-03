@@ -160,6 +160,9 @@ class TelegramSessionPool:
                         if not sender_username or not text:
                             return
 
+                        msg_id = getattr(event.message, "id", None)
+                        msg_date = getattr(event.message, "date", None)
+
                         from app.core.db import async_session_maker
                         from app.modules.payments.notifications import (
                             process_bot_notification,
@@ -167,14 +170,15 @@ class TelegramSessionPool:
 
                         async with async_session_maker() as db:
                             try:
-                                updated = await process_bot_notification(
+                                await process_bot_notification(
                                     session=db,
                                     account_id=acc_id,
                                     sender_username=sender_username,
                                     message_text=text,
+                                    message_id=msg_id,
+                                    message_date=msg_date,
                                 )
-                                if updated:
-                                    await db.commit()
+                                await db.commit()
                             except Exception as e:
                                 await db.rollback()
                                 logger.error(

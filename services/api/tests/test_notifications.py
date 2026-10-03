@@ -250,7 +250,7 @@ async def test_process_bot_notification_starslly_exclusive_slot(
         account_id=sample_account.id,
         status=PaymentStatus.PENDING,
         expires_at=now + timedelta(minutes=30),
-        meta={"stars_count": 50},
+        meta={"stars_count": 50, "slot_lock_token": "token_sl_test"},
     )
     db_session.add(payment)
     await db_session.flush()
@@ -269,7 +269,9 @@ async def test_process_bot_notification_starslly_exclusive_slot(
 
     assert updated is not None
     assert updated.status == PaymentStatus.PAID
-    mock_release_slot.assert_awaited_once_with("starslly_bot", sample_account.id)
+    mock_release_slot.assert_awaited_once_with(
+        "starslly_bot", sample_account.id, owner_token="token_sl_test"
+    )
 
 
 @pytest.mark.asyncio
@@ -443,3 +445,71 @@ async def test_mismatched_order_id_does_not_fallback_to_another_payment(
     assert res is None
     await db_session.refresh(payment)
     assert payment.status == PaymentStatus.PENDING
+
+
+@pytest.mark.asyncio
+async def test_unmatched_notification_re_matched_when_payment_arrives(
+    db_session: AsyncSession,
+) -> None:
+    """
+    Test that an unmatched event is subsequently matched and upgraded
+    to processed.
+    """
+    from sqlmodel import select
+
+    from app.modules.payments.models import NotificationEvent
+
+    sample_account = await _create_test_account(db_session, "Account Unmatched")
+    now = datetime.now(UTC)
+    text = "✅ Ваш заказ выполнен!\n⭐️ 50 Stars\n📝 Заказ №999888"
+
+    # 1. Message arrives before payment is inserted into DB
+    res1 = await process_bot_notification(
+        session=db_session,
+        account_id=sample_account.id,
+        sender_username="StarShoppik_bot",
+        message_text=text,
+        message_id=999123,
+        message_date=now,
+    )
+    assert res1 is None
+
+    # Verify event stored as 'unmatched'
+    stmt = select(NotificationEvent).where(
+        NotificationEvent.message_id == 999123,
+        NotificationEvent.account_id == sample_account.id,
+    )
+    event = (await db_session.exec(stmt)).first()
+    assert event is not None
+    assert event.status == "unmatched"
+
+    # 2. Payment arrives
+    payment = Payment(
+        client_user_id="user_late",
+        scenario_id="starshoppik_bot",
+        amount=Decimal("50.00"),
+        account_id=sample_account.id,
+        status=PaymentStatus.PENDING,
+        expires_at=now + timedelta(minutes=30),
+        meta={"order_id": "999888", "stars_count": 50},
+    )
+    db_session.add(payment)
+    await db_session.flush()
+
+    # 3. Notification scanner or re-check re-evaluates the same message
+    res2 = await process_bot_notification(
+        session=db_session,
+        account_id=sample_account.id,
+        sender_username="StarShoppik_bot",
+        message_text=text,
+        message_id=999123,
+        message_date=now,
+    )
+    assert res2 is not None
+    assert res2.id == payment.id
+    assert res2.status == PaymentStatus.PAID
+
+    # Event status must now be upgraded to 'processed'
+    await db_session.refresh(event)
+    assert event.status == "processed"
+    assert event.payment_id == payment.id

@@ -214,6 +214,8 @@ async def test_starslly_bot_scenario_complete_flow() -> None:
 
         assert result.payment_link == "https://sbp.nspk.ru/pay/invoice_token_12345"
         assert result.meta["stars_count"] == 300
+        assert result.meta["base_stars_count"] == 300
+        assert result.meta["stars_delta"] == 0
         assert result.meta["recipient_username"] == "@target_friend"
 
         # Verify button clicks

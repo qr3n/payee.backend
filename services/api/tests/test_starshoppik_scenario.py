@@ -118,8 +118,12 @@ async def test_starshoppik_bot_scenario_full_flow(
 
     msg_invoice = MagicMock()
     msg_invoice.out = False
-    msg_invoice.id = 207
-    msg_invoice.text = "🛒 Оплата заказа\nСпособ: СБП 🏦\n👇 Нажмите «Перейти к оплате»"
+    msg_invoice.text = (
+        "🛒 Оплата заказа\n"
+        "📝 Заказ № #001908\n"
+        "Способ: СБП 🏦\n"
+        "👇 Нажмите «Перейти к оплате»"
+    )
     msg_invoice.buttons = [[btn_pay_link]]
 
     responses = [
@@ -161,6 +165,7 @@ async def test_starshoppik_bot_scenario_full_flow(
 
         assert result.payment_link == "https://gate.antilopay.com/payment/APAY12345"
         assert result.meta["stars_count"] == 141
+        assert result.meta["order_id"] == "001908"
         assert result.meta["recipient_username"] == "@qr3nnn"
         assert result.meta["payment_method"] == "СБП"
 

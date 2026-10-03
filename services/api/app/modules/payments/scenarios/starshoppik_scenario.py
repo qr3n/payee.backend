@@ -4,6 +4,8 @@ Executes complete automated MTProto flow to generate invoice payment link,
 supporting two-phase execution (pre-warmed fast-path with graceful full-path fallback).
 """
 
+import re
+
 from telethon import TelegramClient
 
 from app.core.config import settings
@@ -225,10 +227,17 @@ class StarShoppikBotScenario(BasePaymentScenario):
         _, payment_link = url_button_info
         timer.record_stage("extract_payment_link", "Получение ссылки на оплату")
 
+        msg_text = getattr(invoice_msg, "text", "") or ""
+        order_match = re.search(r"Заказ №\s*#?(\w+)", msg_text) or re.search(
+            r"#(\d+)", msg_text
+        )
+        order_id = order_match.group(1) if order_match else None
+
         return ScenarioResult(
             payment_link=payment_link,
             meta={
                 "stars_count": stars_count,
+                "order_id": order_id,
                 "recipient_username": recipient,
                 "bot_username": bot_username,
                 "payment_method": "СБП",
@@ -393,10 +402,17 @@ class StarShoppikBotScenario(BasePaymentScenario):
         _, payment_link = url_button_info
         timer.record_stage("extract_payment_link", "Получение ссылки на оплату")
 
+        msg_text = getattr(invoice_msg, "text", "") or ""
+        order_match = re.search(r"Заказ №\s*#?(\w+)", msg_text) or re.search(
+            r"#(\d+)", msg_text
+        )
+        order_id = order_match.group(1) if order_match else None
+
         return ScenarioResult(
             payment_link=payment_link,
             meta={
                 "stars_count": stars_count,
+                "order_id": order_id,
                 "recipient_username": recipient,
                 "bot_username": bot_username,
                 "payment_method": "СБП",

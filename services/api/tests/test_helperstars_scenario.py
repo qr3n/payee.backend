@@ -183,6 +183,8 @@ async def test_helperstars_bot_scenario_full_flow(
 
         assert result.payment_link == "https://cardlink.link/transfer/TEST12345"
         assert result.meta["stars_count"] == 142
+        assert result.meta["base_stars_count"] == 142
+        assert result.meta["stars_delta"] == 0
         assert result.meta["recipient_username"] == "@qr3nnn"
         assert result.meta["payment_method"] == "СБП"
 

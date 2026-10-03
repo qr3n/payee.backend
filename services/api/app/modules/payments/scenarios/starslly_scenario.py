@@ -25,11 +25,13 @@ from app.modules.payments.scenarios.bot_dialog_helper import (
 )
 from app.modules.payments.scenarios.stage_timer import StageTimer
 from app.modules.payments.scenarios.stars_calculator import (
+    allocate_unique_stars_for_scenario,
     calculate_stars_from_amount,
 )
 from app.modules.payments.scenarios.state import (
     clear_scenario_prepared,
     is_scenario_prepared,
+    release_scenario_stars_reservation,
     set_scenario_prepared,
 )
 
@@ -66,10 +68,14 @@ class StarsllyBotScenario(BasePaymentScenario):
         if not recipient.startswith("@"):
             recipient = f"@{recipient}"
 
-        stars_count = calculate_stars_from_amount(
+        base_stars = calculate_stars_from_amount(
             amount=ctx.amount,
             currency=ctx.currency,
             rate=ctx.meta.get("rate"),
+        )
+        stars_count, stars_delta = await allocate_unique_stars_for_scenario(
+            scenario_id=self.scenario_id,
+            base_stars=base_stars,
         )
 
         timer = StageTimer()
@@ -80,7 +86,9 @@ class StarsllyBotScenario(BasePaymentScenario):
                 account_id=str(ctx.account.id),
                 bot=bot_username,
                 recipient=recipient,
+                base_stars=base_stars,
                 stars_count=stars_count,
+                stars_delta=stars_delta,
                 amount=str(ctx.amount),
             )
             client = await telegram_session_pool.get_connected_client(ctx.account)
@@ -104,6 +112,8 @@ class StarsllyBotScenario(BasePaymentScenario):
                         stars_count=stars_count,
                     )
                     await clear_scenario_prepared(ctx.account.id, self.scenario_id)
+                    res.meta["base_stars_count"] = base_stars
+                    res.meta["stars_delta"] = stars_delta
                     return res
                 except Exception as exc:
                     logger.warning(
@@ -128,11 +138,15 @@ class StarsllyBotScenario(BasePaymentScenario):
                 stars_count=stars_count,
             )
             await clear_scenario_prepared(ctx.account.id, self.scenario_id)
+            res.meta["base_stars_count"] = base_stars
+            res.meta["stars_delta"] = stars_delta
             return res
 
         except AppException:
+            await release_scenario_stars_reservation(self.scenario_id, stars_count)
             raise
         except TimeoutError as e:
+            await release_scenario_stars_reservation(self.scenario_id, stars_count)
             logger.error("Starslly bot interaction timed out", error=str(e))
             raise AppException(
                 message=f"Timeout waiting for response from @{bot_username}: {e}",
@@ -140,6 +154,7 @@ class StarsllyBotScenario(BasePaymentScenario):
                 status_code=504,
             ) from e
         except Exception as e:
+            await release_scenario_stars_reservation(self.scenario_id, stars_count)
             logger.error("Unexpected error in Starslly scenario", error=str(e))
             raise AppException(
                 message=f"Failed to generate payment link via @{bot_username}: {e}",

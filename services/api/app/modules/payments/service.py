@@ -27,6 +27,8 @@ from app.modules.payments.scenarios import (
     is_account_generation_locked,
     release_account_generation_lock,
     release_all_account_generation_locks,
+    release_all_scenario_stars_reservations,
+    release_scenario_stars_reservation,
     scenario_registry,
 )
 from app.modules.payments.schemas import (
@@ -284,6 +286,13 @@ async def mark_payment_status(
             updated_meta.update(callback.meta)
         db_payment.meta = updated_meta
 
+    # Release any reserved stars count for the scenario
+    stars_count = db_payment.meta.get("stars_count")
+    if stars_count and db_payment.scenario_id:
+        await release_scenario_stars_reservation(
+            db_payment.scenario_id, int(stars_count)
+        )
+
     session.add(db_payment)
     await session.flush()
     await session.refresh(db_payment)
@@ -298,6 +307,13 @@ async def cancel_payment(
     now = datetime.now(UTC)
     db_payment.status = PaymentStatus.CANCELLED
     db_payment.cancelled_at = now
+
+    stars_count = db_payment.meta.get("stars_count")
+    if stars_count and db_payment.scenario_id:
+        await release_scenario_stars_reservation(
+            db_payment.scenario_id, int(stars_count)
+        )
+
     session.add(db_payment)
     await session.flush()
     await session.refresh(db_payment)
@@ -319,6 +335,11 @@ async def expire_overdue_payments(session: AsyncSession) -> int:
 
     for payment in overdue:
         payment.status = PaymentStatus.EXPIRED
+        stars_count = payment.meta.get("stars_count")
+        if stars_count and payment.scenario_id:
+            await release_scenario_stars_reservation(
+                payment.scenario_id, int(stars_count)
+            )
         session.add(payment)
 
     if overdue:
@@ -351,8 +372,9 @@ async def release_all_locked_accounts(session: AsyncSession) -> tuple[int, int]:
     if active_pending:
         await session.flush()
 
-    # Release any lingering Redis generation locks
+    # Release any lingering Redis generation locks and stars reservations
     cleared_redis_locks = await release_all_account_generation_locks()
+    await release_all_scenario_stars_reservations()
 
     logger.info(
         "all_locked_accounts_released",

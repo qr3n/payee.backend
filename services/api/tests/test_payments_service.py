@@ -477,3 +477,42 @@ async def test_fast_path_payment_execution(db_session: AsyncSession) -> None:
     timings = payment.meta.get("stage_timings", [])
     fast_stages = [s for s in timings if "быстрый путь" in s.get("description", "")]
     assert len(fast_stages) >= 1
+
+
+@pytest.mark.asyncio
+async def test_allocate_unique_stars_for_scenario() -> None:
+    """Test allocating unique stars with delta upon collisions."""
+    from app.modules.payments.scenarios.stars_calculator import (
+        allocate_unique_stars_for_scenario,
+    )
+    from app.modules.payments.scenarios.state import (
+        release_all_scenario_stars_reservations,
+    )
+
+    await release_all_scenario_stars_reservations()
+
+    # 1. First allocation for 100 stars gets delta 0
+    stars1, delta1 = await allocate_unique_stars_for_scenario("starslly_bot", 100)
+    assert stars1 == 100
+    assert delta1 == 0
+
+    # 2. Second allocation for 100 stars collides and gets +1 delta (101 stars)
+    stars2, delta2 = await allocate_unique_stars_for_scenario("starslly_bot", 100)
+    assert stars2 == 101
+    assert delta2 == 1
+
+    # 3. Third allocation gets +2 delta (102 stars)
+    stars3, delta3 = await allocate_unique_stars_for_scenario("starslly_bot", 100)
+    assert stars3 == 102
+    assert delta3 == 2
+
+    # 4. Different scenario_id is isolated:
+    # helperstars_bot gets 100 stars without delta
+    stars_other, delta_other = await allocate_unique_stars_for_scenario(
+        "helperstars_bot", 100
+    )
+    assert stars_other == 100
+    assert delta_other == 0
+
+    # Cleanup
+    await release_all_scenario_stars_reservations()

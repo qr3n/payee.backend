@@ -143,3 +143,68 @@ async def release_all_account_generation_locks() -> int:
     except Exception as exc:
         logger.warning("failed_releasing_all_account_generation_locks", error=str(exc))
         return 0
+
+
+def _scenario_stars_lock_key(scenario_id: str, stars_count: int) -> str:
+    return f"lock:scenario_stars:{scenario_id}:{stars_count}"
+
+
+async def acquire_scenario_stars_reservation(
+    scenario_id: str,
+    stars_count: int,
+    ttl_seconds: int = 1800,  # 30 minutes (matches payment TTL)
+) -> bool:
+    """
+    Atomically reserve a specific stars_count for a scenario in Redis.
+    Prevents two concurrent open invoices from sharing the exact same stars count.
+    """
+    try:
+        redis = get_redis()
+        res = await redis.set(
+            _scenario_stars_lock_key(scenario_id, stars_count),
+            "1",
+            nx=True,
+            ex=ttl_seconds,
+        )
+        return bool(res)
+    except Exception as exc:
+        logger.warning(
+            "failed_acquiring_scenario_stars_reservation",
+            scenario_id=scenario_id,
+            stars_count=stars_count,
+            error=str(exc),
+        )
+        return True
+
+
+async def release_scenario_stars_reservation(
+    scenario_id: str,
+    stars_count: int,
+) -> None:
+    """Release a reserved stars count for a scenario."""
+    try:
+        redis = get_redis()
+        await redis.delete(_scenario_stars_lock_key(scenario_id, stars_count))
+    except Exception as exc:
+        logger.debug(
+            "failed_releasing_scenario_stars_reservation",
+            scenario_id=scenario_id,
+            stars_count=stars_count,
+            error=str(exc),
+        )
+
+
+async def release_all_scenario_stars_reservations() -> int:
+    """Release all reserved stars count keys across all scenarios."""
+    try:
+        redis = get_redis()
+        keys = await redis.keys("lock:scenario_stars:*")
+        if keys:
+            deleted = await redis.delete(*keys)
+            return int(deleted)
+        return 0
+    except Exception as exc:
+        logger.warning(
+            "failed_releasing_all_scenario_stars_reservations", error=str(exc)
+        )
+        return 0

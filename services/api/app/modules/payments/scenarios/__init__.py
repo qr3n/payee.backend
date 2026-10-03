@@ -26,8 +26,12 @@ from app.modules.payments.scenarios.starslly_scenario import (
     StarsllyBotScenario,
 )
 from app.modules.payments.scenarios.state import (
+    acquire_account_generation_lock,
     clear_scenario_prepared,
+    is_account_generation_locked,
     is_scenario_prepared,
+    release_account_generation_lock,
+    release_all_account_generation_locks,
     set_scenario_prepared,
 )
 
@@ -41,9 +45,13 @@ __all__ = [
     "StageTimer",
     "StarShoppikBotScenario",
     "StarsllyBotScenario",
+    "acquire_account_generation_lock",
     "calculate_stars_from_amount",
     "clear_scenario_prepared",
+    "is_account_generation_locked",
     "is_scenario_prepared",
+    "release_account_generation_lock",
+    "release_all_account_generation_locks",
     "scenario_registry",
     "set_scenario_prepared",
 ]

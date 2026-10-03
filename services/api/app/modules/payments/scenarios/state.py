@@ -77,3 +77,69 @@ async def clear_scenario_prepared(account_id: UUID | str, scenario_id: str) -> N
             scenario_id=scenario_id,
             error=str(exc),
         )
+
+
+def _generation_lock_key(account_id: UUID | str) -> str:
+    return f"lock:account_generation:{account_id}"
+
+
+async def acquire_account_generation_lock(
+    account_id: UUID | str,
+    ttl_seconds: int = 90,
+) -> bool:
+    """
+    Atomically acquire an exclusive generation lock for an account in Redis.
+    Locks the account ONLY for the duration of invoice generation (5-15s).
+    Auto-expires in 90 seconds if the process dies unexpectedly.
+    """
+    try:
+        redis = get_redis()
+        res = await redis.set(
+            _generation_lock_key(account_id), "1", nx=True, ex=ttl_seconds
+        )
+        return bool(res)
+    except Exception as exc:
+        logger.warning(
+            "failed_acquiring_account_generation_lock",
+            account_id=str(account_id),
+            error=str(exc),
+        )
+        # Fallback to True if Redis check fails to avoid completely halting
+        return True
+
+
+async def release_account_generation_lock(account_id: UUID | str) -> None:
+    """Immediately release the generation lock once payment link is produced."""
+    try:
+        redis = get_redis()
+        await redis.delete(_generation_lock_key(account_id))
+    except Exception as exc:
+        logger.debug(
+            "failed_releasing_account_generation_lock",
+            account_id=str(account_id),
+            error=str(exc),
+        )
+
+
+async def is_account_generation_locked(account_id: UUID | str) -> bool:
+    """Check if account is currently actively generating a payment link."""
+    try:
+        redis = get_redis()
+        val = await redis.get(_generation_lock_key(account_id))
+        return val is not None
+    except Exception:
+        return False
+
+
+async def release_all_account_generation_locks() -> int:
+    """Release all active account generation locks from Redis."""
+    try:
+        redis = get_redis()
+        keys = await redis.keys("lock:account_generation:*")
+        if keys:
+            deleted = await redis.delete(*keys)
+            return int(deleted)
+        return 0
+    except Exception as exc:
+        logger.warning("failed_releasing_all_account_generation_locks", error=str(exc))
+        return 0

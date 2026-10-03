@@ -19,6 +19,9 @@ from app.modules.payments.scenarios import (
     BasePaymentScenario,
     ScenarioContext,
     ScenarioResult,
+    acquire_account_generation_lock,
+    is_account_generation_locked,
+    release_account_generation_lock,
     scenario_registry,
 )
 from app.modules.payments.schemas import PaymentCallback, PaymentCreate
@@ -57,7 +60,9 @@ async def _create_test_account(session: AsyncSession, title: str) -> TelegramAcc
 async def test_pool_exhaustion_and_account_acquisition(
     db_session: AsyncSession,
 ) -> None:
-    """Test accounts are acquired from the pool and error raised when exhausted."""
+    """
+    Test account acquisition from pool and error raised when all are generation-locked.
+    """
     # Create 2 accounts in the pool
     acc1 = await _create_test_account(db_session, "Pool Account 1")
     acc2 = await _create_test_account(db_session, "Pool Account 2")
@@ -77,20 +82,14 @@ async def test_pool_exhaustion_and_account_acquisition(
     assert len(p1.meta["stage_timings"]) >= 1
     assert p1.meta["stage_timings"][0]["stage"] == "account_acquisition"
     assert "generation_time_sec" in p1.meta
+    # Account generation lock is released immediately after link creation
+    assert not await is_account_generation_locked(p1.account_id)
 
-    # User 2 creates payment
-    p2 = await create_payment(
-        db_session,
-        PaymentCreate(
-            client_user_id="user_beta",
-            scenario_id="mock_bot",
-            amount=Decimal("200.00"),
-        ),
-    )
-    assert p2.account_id in (acc1.id, acc2.id)
-    assert p2.account_id != p1.account_id
+    # When all accounts are generation-locked by concurrent tasks:
+    await acquire_account_generation_lock(acc1.id)
+    await acquire_account_generation_lock(acc2.id)
 
-    # User 3 tries to create payment -> Pool is full!
+    # Next user tries to create payment -> Pool is full!
     with pytest.raises(NoAccountsAvailableException):
         await create_payment(
             db_session,
@@ -100,6 +99,19 @@ async def test_pool_exhaustion_and_account_acquisition(
                 amount=Decimal("300.00"),
             ),
         )
+
+    # Releasing generation lock allows acquisition again
+    await release_account_generation_lock(acc1.id)
+    p2 = await create_payment(
+        db_session,
+        PaymentCreate(
+            client_user_id="user_gamma",
+            scenario_id="mock_bot",
+            amount=Decimal("300.00"),
+        ),
+    )
+    assert p2.account_id == acc1.id
+    await release_account_generation_lock(acc2.id)
 
 
 @pytest.mark.asyncio
@@ -147,7 +159,7 @@ async def test_same_user_cancels_previous_and_reuses_account(
 async def test_reactive_account_release_on_paid_callback(
     db_session: AsyncSession,
 ) -> None:
-    """Test paying an invoice reactively and immediately frees the account."""
+    """Test paying an invoice reactively updates status to PAID."""
     acc = await _create_test_account(db_session, "Quick Account")
 
     p1 = await create_payment(
@@ -160,17 +172,6 @@ async def test_reactive_account_release_on_paid_callback(
     )
     assert p1.account_id == acc.id
 
-    # Another user cannot pay yet
-    with pytest.raises(NoAccountsAvailableException):
-        await create_payment(
-            db_session,
-            PaymentCreate(
-                client_user_id="payer_two",
-                scenario_id="mock_bot",
-                amount=Decimal("300.00"),
-            ),
-        )
-
     # P1 is paid via callback
     await mark_payment_status(
         db_session,
@@ -181,7 +182,12 @@ async def test_reactive_account_release_on_paid_callback(
         ),
     )
 
-    # Account is now reactively freed! Payer two can now create payment
+    refreshed = await get_payment(db_session, p1.id)
+    assert refreshed is not None
+    assert refreshed.status == PaymentStatus.PAID
+    assert refreshed.paid_at is not None
+
+    # Another user can create payment smoothly
     p2 = await create_payment(
         db_session,
         PaymentCreate(

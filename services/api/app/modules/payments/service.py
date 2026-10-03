@@ -23,6 +23,10 @@ from app.modules.payments.models import Payment, PaymentStatus
 from app.modules.payments.resolvers import resolve_sbp_link
 from app.modules.payments.scenarios import (
     ScenarioContext,
+    acquire_account_generation_lock,
+    is_account_generation_locked,
+    release_account_generation_lock,
+    release_all_account_generation_locks,
     scenario_registry,
 )
 from app.modules.payments.schemas import (
@@ -58,32 +62,25 @@ async def get_active_payment_for_user(
 
 async def acquire_free_account(
     session: AsyncSession,
-    now: datetime,
 ) -> TelegramAccount | None:
     """
-    Find an active Telegram account not currently locked by an active payment.
-    Releases automatically and reactively when payment status is not pending or expired.
+    Find an active Telegram account not currently locked by an active generation.
+    Accounts are locked exclusively for invoice generation (5-15s), not 30m pending.
     """
-    active_locked_account_ids = (
-        select(Payment.account_id)
-        .where(
-            Payment.status == PaymentStatus.PENDING,
-            Payment.expires_at > now,
-        )
-        .scalar_subquery()
-    )
-
     statement = (
         select(TelegramAccount)
         .where(
             TelegramAccount.status == AccountStatus.ACTIVE,
-            col(TelegramAccount.id).not_in(active_locked_account_ids),
         )
         .order_by(col(TelegramAccount.updated_at).asc())
-        .limit(1)
     )
     result = await session.exec(statement)
-    return result.first()
+    active_accounts = result.all()
+
+    for account in active_accounts:
+        if await acquire_account_generation_lock(account.id):
+            return account
+    return None
 
 
 async def create_payment(
@@ -91,9 +88,10 @@ async def create_payment(
     payment_in: PaymentCreate,
 ) -> Payment:
     """
-    Create a new payment and reserve an account for 30 minutes.
-    If the same user creates a new payment, cancels their previous payment
-    and re-uses the same account.
+    Create a new payment. Accounts are locked strictly during invoice generation.
+    Once the payment link is obtained, the account lock is released and the account
+    is immediately re-warmed in the background for the next customer.
+    If the same user creates a new payment, cancels their previous payment.
     """
     t_start = time.perf_counter()
     now = datetime.now(UTC)
@@ -115,97 +113,105 @@ async def create_payment(
         session.add(existing_payment)
         await session.flush()
 
-        # Re-use the same account if it's still active
+        # Re-use the same account if it's still active and not currently generating
         acc_stmt = select(TelegramAccount).where(
             TelegramAccount.id == existing_payment.account_id,
             TelegramAccount.status == AccountStatus.ACTIVE,
         )
         acc_result = await session.exec(acc_stmt)
-        account = acc_result.first()
+        candidate = acc_result.first()
+        if candidate and await acquire_account_generation_lock(candidate.id):
+            account = candidate
 
-    # If no existing active payment or account was deactivated, acquire a new free one
+    # If no existing active payment or candidate was busy, acquire a free one
     if not account:
-        account = await acquire_free_account(session, now)
+        account = await acquire_free_account(session)
 
     account_lookup_duration = round(time.perf_counter() - account_lookup_start, 2)
 
     if not account:
         raise NoAccountsAvailableException()
 
-    # 2. Execute scenario to generate payment link
-    ctx = ScenarioContext(
-        client_user_id=payment_in.client_user_id,
-        amount=payment_in.amount,
-        currency=payment_in.currency,
-        account=account,
-        meta=payment_in.meta,
-    )
-    result = await scenario.create_payment(ctx)
-
-    # 3. Attempt extraction of direct SBP (NSPK) link if supported gateway link
-    t_resolve_start = time.perf_counter()
-    resolved_link, is_resolved = await resolve_sbp_link(result.payment_link)
-    resolve_duration = round(time.perf_counter() - t_resolve_start, 2)
-
-    total_duration_sec = round(time.perf_counter() - t_start, 2)
-
-    scenario_stages = list(result.meta.get("stage_timings", []))
-    all_stages = [
-        {
-            "stage": "account_acquisition",
-            "description": "Поиск и выделение аккаунта в пуле",
-            "duration_sec": account_lookup_duration,
-        },
-        *scenario_stages,
-    ]
-
-    if is_resolved:
-        all_stages.append(
-            {
-                "stage": "resolve_sbp_link",
-                "description": "Извлечение прямой ссылки СБП (НСПК)",
-                "duration_sec": resolve_duration,
-            }
+    try:
+        # 2. Execute scenario to generate payment link
+        ctx = ScenarioContext(
+            client_user_id=payment_in.client_user_id,
+            amount=payment_in.amount,
+            currency=payment_in.currency,
+            account=account,
+            meta=payment_in.meta,
         )
-    elif "gate.antilopay.com" in (result.payment_link or "") or "cardlink.link" in (
-        result.payment_link or ""
-    ):
-        all_stages.append(
+        result = await scenario.create_payment(ctx)
+
+        # 3. Attempt extraction of direct SBP (NSPK) link if supported gateway link
+        t_resolve_start = time.perf_counter()
+        resolved_link, is_resolved = await resolve_sbp_link(result.payment_link)
+        resolve_duration = round(time.perf_counter() - t_resolve_start, 2)
+
+        total_duration_sec = round(time.perf_counter() - t_start, 2)
+
+        scenario_stages = list(result.meta.get("stage_timings", []))
+        all_stages = [
             {
-                "stage": "resolve_sbp_link",
-                "description": "Попытка извлечения ссылки СБП (оставлен оригинал)",
-                "duration_sec": resolve_duration,
-            }
+                "stage": "account_acquisition",
+                "description": "Поиск и выделение аккаунта в пуле",
+                "duration_sec": account_lookup_duration,
+            },
+            *scenario_stages,
+        ]
+
+        if is_resolved:
+            all_stages.append(
+                {
+                    "stage": "resolve_sbp_link",
+                    "description": "Извлечение прямой ссылки СБП (НСПК)",
+                    "duration_sec": resolve_duration,
+                }
+            )
+        elif "gate.antilopay.com" in (result.payment_link or "") or "cardlink.link" in (
+            result.payment_link or ""
+        ):
+            all_stages.append(
+                {
+                    "stage": "resolve_sbp_link",
+                    "description": "Попытка извлечения ссылки СБП (оставлен оригинал)",
+                    "duration_sec": resolve_duration,
+                }
+            )
+
+        merged_meta = {
+            **payment_in.meta,
+            **result.meta,
+            "original_payment_link": result.payment_link,
+            "resolved_sbp_link": resolved_link if is_resolved else None,
+            "is_sbp_resolved": is_resolved,
+            "generation_time_sec": total_duration_sec,
+            "stage_timings": all_stages,
+        }
+
+        # 4. Create new payment record
+        payment = Payment(
+            client_user_id=payment_in.client_user_id,
+            scenario_id=scenario.scenario_id,
+            amount=payment_in.amount,
+            currency=payment_in.currency,
+            account_id=account.id,
+            status=PaymentStatus.PENDING,
+            payment_link=resolved_link,
+            expires_at=expires_at,
+            meta=merged_meta,
         )
 
-    merged_meta = {
-        **payment_in.meta,
-        **result.meta,
-        "original_payment_link": result.payment_link,
-        "resolved_sbp_link": resolved_link if is_resolved else None,
-        "is_sbp_resolved": is_resolved,
-        "generation_time_sec": total_duration_sec,
-        "stage_timings": all_stages,
-    }
+        account.updated_at = now
+        session.add(account)
+        session.add(payment)
+        await session.flush()
+        await session.refresh(payment)
+    finally:
+        # Release the generation lock immediately once link is obtained or upon error
+        await release_account_generation_lock(account.id)
 
-    # 4. Create new payment record
-    payment = Payment(
-        client_user_id=payment_in.client_user_id,
-        scenario_id=scenario.scenario_id,
-        amount=payment_in.amount,
-        currency=payment_in.currency,
-        account_id=account.id,
-        status=PaymentStatus.PENDING,
-        payment_link=resolved_link,
-        expires_at=expires_at,
-        meta=merged_meta,
-    )
-
-    session.add(payment)
-    await session.flush()
-    await session.refresh(payment)
-
-    # 4. Trigger non-blocking background re-preparation for subsequent use
+    # 5. Trigger non-blocking background re-preparation for subsequent use
     try:
         from app.modules.payments.tasks import dispatch_single_scenario_warmup
 
@@ -345,12 +351,16 @@ async def release_all_locked_accounts(session: AsyncSession) -> tuple[int, int]:
     if active_pending:
         await session.flush()
 
+    # Release any lingering Redis generation locks
+    cleared_redis_locks = await release_all_account_generation_locks()
+
     logger.info(
         "all_locked_accounts_released",
         cancelled_payments=len(active_pending),
         released_accounts=len(released_account_ids),
+        cleared_redis_locks=cleared_redis_locks,
     )
-    return len(active_pending), len(released_account_ids)
+    return len(active_pending), max(len(released_account_ids), cleared_redis_locks)
 
 
 async def prepare_account_scenarios(
@@ -458,24 +468,22 @@ async def refresh_idle_account_scenarios(
     session: AsyncSession,
 ) -> dict[str, Any]:
     """
-    Scan active accounts without active pending payments and re-prepare
-    any scenarios whose preparation is missing or expired in Redis.
+    Scan active accounts that are not currently in the middle of invoice generation
+    and re-prepare any scenarios whose preparation is missing or expired in Redis.
     """
     from app.modules.payments.scenarios.state import is_scenario_prepared
-
-    now = datetime.now(UTC)
-    pending_accounts_query = select(Payment.account_id).where(
-        Payment.status == PaymentStatus.PENDING,
-        Payment.expires_at > now,
-    )
-    pending_res = await session.exec(pending_accounts_query)
-    busy_account_ids = set(pending_res.all())
 
     acc_query = select(TelegramAccount).where(
         TelegramAccount.status == AccountStatus.ACTIVE,
     )
     acc_res = await session.exec(acc_query)
-    active_accounts = [acc for acc in acc_res.all() if acc.id not in busy_account_ids]
+    all_active = acc_res.all()
+
+    # Filter out accounts currently performing invoice generation
+    active_accounts = []
+    for acc in all_active:
+        if not await is_account_generation_locked(acc.id):
+            active_accounts.append(acc)
 
     scenarios = scenario_registry.list()
     refreshed: list[dict[str, str]] = []
@@ -519,33 +527,29 @@ async def refresh_idle_account_scenarios(
 
 async def acquire_N_free_accounts(
     session: AsyncSession,
-    now: datetime,
     n: int,
 ) -> list[TelegramAccount]:
     """
-    Acquire up to N free Telegram accounts (not locked by active payments).
-    Returns the least-recently-used accounts first.
+    Acquire up to N free Telegram accounts (not currently locked by generation).
+    Returns LRU accounts first and atomically locks them for generation.
     """
-    active_locked_account_ids = (
-        select(Payment.account_id)
-        .where(
-            Payment.status == PaymentStatus.PENDING,
-            Payment.expires_at > now,
-        )
-        .scalar_subquery()
-    )
-
     statement = (
         select(TelegramAccount)
         .where(
             TelegramAccount.status == AccountStatus.ACTIVE,
-            col(TelegramAccount.id).not_in(active_locked_account_ids),
         )
         .order_by(col(TelegramAccount.updated_at).asc())
-        .limit(n)
     )
     result = await session.exec(statement)
-    return list(result.all())
+    active_accounts = result.all()
+
+    acquired: list[TelegramAccount] = []
+    for acc in active_accounts:
+        if await acquire_account_generation_lock(acc.id):
+            acquired.append(acc)
+            if len(acquired) == n:
+                break
+    return acquired
 
 
 async def _run_race_scenario_task(
@@ -559,6 +563,7 @@ async def _run_race_scenario_task(
     """
     Run a single scenario for the race. Each task owns its own DB session.
     Returns an SSE-formatted 'event: payment\\ndata: {...}\\n\\n' string on success.
+    Releases the generation lock immediately upon link generation or failure.
     Raises on failure so asyncio.as_completed can propagate it.
     """
     from app.core.db import async_session_maker
@@ -566,82 +571,86 @@ async def _run_race_scenario_task(
         scenario_registry as _registry,
     )
 
-    scenario = _registry.get(scenario_id)
-    if not scenario:
-        raise ValueError(f"Scenario {scenario_id!r} not found in registry")
+    try:
+        scenario = _registry.get(scenario_id)
+        if not scenario:
+            raise ValueError(f"Scenario {scenario_id!r} not found in registry")
 
-    ctx = ScenarioContext(
-        client_user_id=race_in.client_user_id,
-        amount=race_in.amount,
-        currency=race_in.currency,
-        account=account,
-        meta=race_in.meta,
-    )
-
-    result = await scenario.create_payment(ctx)
-
-    # SBP resolution
-    t_resolve_start = time.perf_counter()
-    resolved_link, is_resolved = await resolve_sbp_link(result.payment_link)
-    resolve_duration = round(time.perf_counter() - t_resolve_start, 2)
-
-    generation_time_sec = round(time.perf_counter() - race_start, 2)
-
-    scenario_stages = list(result.meta.get("stage_timings", []))
-    all_stages = [*scenario_stages]
-    if is_resolved:
-        all_stages.append(
-            {
-                "stage": "resolve_sbp_link",
-                "description": "Извлечение прямой ссылки СБП (НСПК)",
-                "duration_sec": resolve_duration,
-            }
-        )
-    elif "gate.antilopay.com" in (result.payment_link or "") or "cardlink.link" in (
-        result.payment_link or ""
-    ):
-        all_stages.append(
-            {
-                "stage": "resolve_sbp_link",
-                "description": "Попытка извлечения ссылки СБП (оставлен оригинал)",
-                "duration_sec": resolve_duration,
-            }
+        ctx = ScenarioContext(
+            client_user_id=race_in.client_user_id,
+            amount=race_in.amount,
+            currency=race_in.currency,
+            account=account,
+            meta=race_in.meta,
         )
 
-    merged_meta = {
-        **race_in.meta,
-        **result.meta,
-        "original_payment_link": result.payment_link,
-        "resolved_sbp_link": resolved_link if is_resolved else None,
-        "is_sbp_resolved": is_resolved,
-        "generation_time_sec": generation_time_sec,
-        "stage_timings": all_stages,
-        "batch_id": str(batch_id),
-    }
+        result = await scenario.create_payment(ctx)
 
-    # Persist payment record (own session + own commit — SSE lifecycle exception)
-    payment: Payment
-    async with async_session_maker() as task_session:
-        try:
-            payment = Payment(
-                client_user_id=race_in.client_user_id,
-                scenario_id=scenario_id,
-                amount=race_in.amount,
-                currency=race_in.currency,
-                account_id=account.id,
-                batch_id=batch_id,
-                status=PaymentStatus.PENDING,
-                payment_link=resolved_link,
-                expires_at=expires_at,
-                meta=merged_meta,
+        # SBP resolution
+        t_resolve_start = time.perf_counter()
+        resolved_link, is_resolved = await resolve_sbp_link(result.payment_link)
+        resolve_duration = round(time.perf_counter() - t_resolve_start, 2)
+
+        generation_time_sec = round(time.perf_counter() - race_start, 2)
+
+        scenario_stages = list(result.meta.get("stage_timings", []))
+        all_stages = [*scenario_stages]
+        if is_resolved:
+            all_stages.append(
+                {
+                    "stage": "resolve_sbp_link",
+                    "description": "Извлечение прямой ссылки СБП (НСПК)",
+                    "duration_sec": resolve_duration,
+                }
             )
-            task_session.add(payment)
-            await task_session.flush()
-            await task_session.refresh(payment)
-            await task_session.commit()
-        except Exception:
-            await task_session.rollback()
-            raise
+        elif "gate.antilopay.com" in (result.payment_link or "") or "cardlink.link" in (
+            result.payment_link or ""
+        ):
+            all_stages.append(
+                {
+                    "stage": "resolve_sbp_link",
+                    "description": "Попытка извлечения ссылки СБП (оставлен оригинал)",
+                    "duration_sec": resolve_duration,
+                }
+            )
+
+        merged_meta = {
+            **race_in.meta,
+            **result.meta,
+            "original_payment_link": result.payment_link,
+            "resolved_sbp_link": resolved_link if is_resolved else None,
+            "is_sbp_resolved": is_resolved,
+            "generation_time_sec": generation_time_sec,
+            "stage_timings": all_stages,
+            "batch_id": str(batch_id),
+        }
+
+        # Persist payment record (own session + own commit — SSE lifecycle exception)
+        payment: Payment
+        async with async_session_maker() as task_session:
+            try:
+                payment = Payment(
+                    client_user_id=race_in.client_user_id,
+                    scenario_id=scenario_id,
+                    amount=race_in.amount,
+                    currency=race_in.currency,
+                    account_id=account.id,
+                    batch_id=batch_id,
+                    status=PaymentStatus.PENDING,
+                    payment_link=resolved_link,
+                    expires_at=expires_at,
+                    meta=merged_meta,
+                )
+                task_session.add(payment)
+                await task_session.flush()
+                await task_session.refresh(payment)
+                await task_session.commit()
+            except Exception:
+                await task_session.rollback()
+                raise
+    finally:
+        # Guarantee generation lock is released once link is obtained or upon error
+        await release_account_generation_lock(account.id)
 
     # Trigger warmup for next use (non-blocking, best-effort)
     try:
@@ -677,8 +686,8 @@ async def create_payment_race_generator(
     """
     Async generator for SSE payment race.
 
-    Acquires up to N free accounts (one per registered scenario), locks them via
-    PENDING stub payments, then runs all scenarios concurrently. Yields each
+    Acquires up to N free accounts (one per registered scenario) locked via Redis
+    strictly during invoice generation. Runs all scenarios concurrently. Yields each
     successful result as it arrives. Cancels remaining tasks after timeout.
 
     SSE event types:
@@ -698,53 +707,34 @@ async def create_payment_race_generator(
 
     # Acquire free accounts (one per scenario, up to num_scenarios)
     async with async_session_maker() as setup_session:
-        try:
-            free_accounts = await acquire_N_free_accounts(
-                setup_session, now, n=num_scenarios
-            )
+        free_accounts = await acquire_N_free_accounts(setup_session, n=num_scenarios)
 
-            if not free_accounts:
-                err_data = json.dumps(
-                    {
-                        "error": "no_accounts_available",
-                        "message": "Нет свободных аккаунтов",
-                    },
-                    ensure_ascii=False,
-                )
-                yield f"event: error\ndata: {err_data}\n\n"
-                done_data = json.dumps(
-                    {"total": 0, "succeeded": 0, "failed": 0},
-                    ensure_ascii=False,
-                )
-                yield f"event: done\ndata: {done_data}\n\n"
-                return
+    if not free_accounts:
+        err_data = json.dumps(
+            {
+                "error": "no_accounts_available",
+                "message": "Нет свободных аккаунтов",
+            },
+            ensure_ascii=False,
+        )
+        yield f"event: error\ndata: {err_data}\n\n"
+        done_data = json.dumps(
+            {"total": 0, "succeeded": 0, "failed": 0},
+            ensure_ascii=False,
+        )
+        yield f"event: done\ndata: {done_data}\n\n"
+        return
 
-            # Build (account, scenario_id) pairs
-            pairs: list[tuple[TelegramAccount, str]] = [
-                (account, scenario.scenario_id)
-                for account, scenario in zip(free_accounts, scenarios, strict=False)
-            ]
+    # Build (account, scenario_id) pairs
+    pairs: list[tuple[TelegramAccount, str]] = [
+        (account, scenario.scenario_id)
+        for account, scenario in zip(free_accounts, scenarios, strict=False)
+    ]
 
-            # Lock accounts by creating PENDING stub payments
-            for account, scenario_id in pairs:
-                stub = Payment(
-                    client_user_id=race_in.client_user_id,
-                    scenario_id=scenario_id,
-                    amount=race_in.amount,
-                    currency=race_in.currency,
-                    account_id=account.id,
-                    batch_id=batch_id,
-                    status=PaymentStatus.PENDING,
-                    payment_link=None,
-                    expires_at=expires_at,
-                    meta={"batch_id": str(batch_id), "race_stub": True},
-                )
-                setup_session.add(stub)
-
-            await setup_session.commit()
-        except Exception:
-            await setup_session.rollback()
-            raise
+    # If we acquired more accounts than scenarios, release extra locks immediately
+    if len(free_accounts) > len(pairs):
+        for unused_acc in free_accounts[len(pairs) :]:
+            await release_account_generation_lock(unused_acc.id)
 
     started_data = json.dumps(
         {"batch_id": str(batch_id), "scenarios": [s for _, s in pairs]},
@@ -797,6 +787,10 @@ async def create_payment_race_generator(
         )
         for task in tasks:
             task.cancel()
+        # Ensure any cancelled tasks also release their generation locks
+        for account, _ in pairs:
+            await release_account_generation_lock(account.id)
+
         timeout_payload = json.dumps(
             {
                 "error": "timeout",

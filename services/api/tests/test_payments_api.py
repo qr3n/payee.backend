@@ -52,11 +52,15 @@ async def test_create_payment_api_success(
 async def test_create_payment_pool_exhausted_returns_409(
     client: AsyncClient, db_session: AsyncSession
 ) -> None:
-    """Test POST /api/v1/payments/ returns 409 when all accounts are reserved."""
-    # Only 1 account in DB
-    await _create_test_account(db_session, "Solo API Account")
+    """
+    Test POST /api/v1/payments/ returns 409 when all accounts are generation-locked.
+    """
+    from app.modules.payments.scenarios import acquire_account_generation_lock
 
-    # 1st user takes the account
+    # Only 1 account in DB
+    acc = await _create_test_account(db_session, "Solo API Account")
+
+    # 1st user creates payment successfully
     p1_resp = await client.post(
         "/api/v1/payments/",
         json={
@@ -66,6 +70,9 @@ async def test_create_payment_pool_exhausted_returns_409(
         },
     )
     assert p1_resp.status_code == 201
+
+    # When all accounts are locked for active generation:
+    await acquire_account_generation_lock(acc.id)
 
     # 2nd user tries to create payment -> 409 NO_ACCOUNTS_AVAILABLE
     p2_resp = await client.post(

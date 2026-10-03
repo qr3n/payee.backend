@@ -321,3 +321,125 @@ async def test_check_all_pending_payments_notifications(
     assert confirmed == 1
     await db_session.refresh(payment)
     assert payment.status == PaymentStatus.PAID
+
+
+@pytest.mark.asyncio
+async def test_notification_event_deduplication(
+    db_session: AsyncSession,
+) -> None:
+    sample_account = await _create_test_account(db_session, "Account Dedup")
+    now = datetime.now(UTC)
+    payment = Payment(
+        client_user_id="user_dedup",
+        scenario_id="starshoppik_bot",
+        amount=Decimal("75.60"),
+        account_id=sample_account.id,
+        status=PaymentStatus.PENDING,
+        expires_at=now + timedelta(minutes=30),
+        meta={"order_id": "009999", "stars_count": 50},
+    )
+    db_session.add(payment)
+    await db_session.flush()
+
+    text = "✅ Ваш заказ выполнен!\n⭐️ 50 Stars отправлены\n📝 Заказ №009999"
+    msg_id = 888123
+
+    with patch(
+        "app.modules.payments.service.release_scenario_stars_reservation",
+        new_callable=AsyncMock,
+    ):
+        # First processing -> success
+        first = await process_bot_notification(
+            session=db_session,
+            account_id=sample_account.id,
+            sender_username="StarShoppik_bot",
+            message_text=text,
+            message_id=msg_id,
+            message_date=now,
+        )
+        assert first is not None
+        assert first.status == PaymentStatus.PAID
+
+        # Second processing with same message_id -> deduplicated (None returned)
+        second = await process_bot_notification(
+            session=db_session,
+            account_id=sample_account.id,
+            sender_username="StarShoppik_bot",
+            message_text=text,
+            message_id=msg_id,
+            message_date=now,
+        )
+        assert second is None
+
+
+@pytest.mark.asyncio
+async def test_old_notification_does_not_confirm_new_payment(
+    db_session: AsyncSession,
+) -> None:
+    sample_account = await _create_test_account(db_session, "Account OldMsg")
+    now = datetime.now(UTC)
+    # Payment created now
+    payment = Payment(
+        client_user_id="user_new",
+        scenario_id="starslly_bot",
+        amount=Decimal("100.00"),
+        account_id=sample_account.id,
+        status=PaymentStatus.PENDING,
+        expires_at=now + timedelta(minutes=30),
+        meta={"stars_count": 100},
+    )
+    db_session.add(payment)
+    await db_session.flush()
+
+    # Message arrived 1 hour AGO (from previous transaction)
+    old_date = now - timedelta(hours=1)
+    text = "✅ Платеж успешно получен!\nВ ближайшее время звезды/TON будут зачислены"
+
+    res = await process_bot_notification(
+        session=db_session,
+        account_id=sample_account.id,
+        sender_username="starslly_bot",
+        message_text=text,
+        message_id=777123,
+        message_date=old_date,
+    )
+    # Must NOT match the new payment!
+    assert res is None
+    await db_session.refresh(payment)
+    assert payment.status == PaymentStatus.PENDING
+
+
+@pytest.mark.asyncio
+async def test_mismatched_order_id_does_not_fallback_to_another_payment(
+    db_session: AsyncSession,
+) -> None:
+    sample_account = await _create_test_account(db_session, "Account Mismatch")
+    now = datetime.now(UTC)
+    # Payment has order_id 111111 and stars_count 50
+    payment = Payment(
+        client_user_id="user_target",
+        scenario_id="starshoppik_bot",
+        amount=Decimal("50.00"),
+        account_id=sample_account.id,
+        status=PaymentStatus.PENDING,
+        expires_at=now + timedelta(minutes=30),
+        meta={"order_id": "111111", "stars_count": 50},
+    )
+    db_session.add(payment)
+    await db_session.flush()
+
+    # Message is for order_id 222222 with 50 stars
+    text = "✅ Ваш заказ выполнен!\n⭐️ 50 Stars\n📝 Заказ №222222"
+
+    res = await process_bot_notification(
+        session=db_session,
+        account_id=sample_account.id,
+        sender_username="StarShoppik_bot",
+        message_text=text,
+        message_id=666123,
+        message_date=now,
+    )
+    # Must NOT confirm payment 111111 even though stars count is 50!
+    assert res is None
+    await db_session.refresh(payment)
+    assert payment.status == PaymentStatus.PENDING

@@ -6,6 +6,7 @@ matching them to pending Payment records and confirming payments.
 
 import re
 from dataclasses import dataclass
+from datetime import datetime, timedelta
 from uuid import UUID
 
 from sqlmodel import col, select
@@ -13,7 +14,7 @@ from sqlmodel.ext.asyncio.session import AsyncSession
 
 from app.core.config import settings
 from app.core.logging import get_logger
-from app.modules.payments.models import Payment, PaymentStatus
+from app.modules.payments.models import NotificationEvent, Payment, PaymentStatus
 from app.modules.payments.schemas import PaymentCallback
 
 logger = get_logger(__name__)
@@ -166,13 +167,43 @@ async def process_bot_notification(
     account_id: UUID,
     sender_username: str,
     message_text: str,
+    message_id: int | None = None,
+    message_date: datetime | None = None,
 ) -> Payment | None:
     """
     Process incoming bot message, match to active PENDING payment in database,
-    and transition payment to PAID.
+    and transition payment to PAID. Prevents duplicate processing via NotificationEvent.
     """
+    # 1. Idempotency check: ignore already processed Telegram message
+    if message_id is not None:
+        existing_event_stmt = select(NotificationEvent).where(
+            NotificationEvent.account_id == account_id,
+            NotificationEvent.bot_username == sender_username,
+            NotificationEvent.message_id == message_id,
+        )
+        existing_event_res = await session.exec(existing_event_stmt)
+        if existing_event_res.first():
+            logger.info(
+                "bot_notification_already_processed_skipping",
+                account_id=str(account_id),
+                bot=sender_username,
+                message_id=message_id,
+            )
+            return None
+
     parsed = parse_bot_payment_message(sender_username, message_text)
     if not parsed or not parsed.is_success:
+        if message_id is not None:
+            ign_event = NotificationEvent(
+                account_id=account_id,
+                bot_username=sender_username,
+                message_id=message_id,
+                message_date=message_date,
+                status="ignored",
+                raw_text=message_text,
+            )
+            session.add(ign_event)
+            await session.flush()
         return None
 
     logger.info(
@@ -182,12 +213,13 @@ async def process_bot_notification(
         order_id=parsed.order_id,
         stars_count=parsed.stars_count,
         recipient=parsed.recipient,
+        message_id=message_id,
     )
 
     matched_payment: Payment | None = None
 
     if parsed.scenario_id == "starshoppik_bot":
-        # 1. Primary match: order_id
+        # 1. Primary match: order_id (Strict: if order_id is present, NEVER fallback)
         if parsed.order_id:
             stmt = (
                 select(Payment)
@@ -202,8 +234,8 @@ async def process_bot_notification(
                 if p.meta.get("order_id") == parsed.order_id:
                     matched_payment = p
                     break
-        # 2. Secondary fallback match: account_id + stars_count
-        if not matched_payment and parsed.stars_count:
+        elif parsed.stars_count:
+            # Only match by stars_count if no order_id was provided by the bot
             stmt = (
                 select(Payment)
                 .where(
@@ -216,11 +248,16 @@ async def process_bot_notification(
             result = await session.exec(stmt)
             for p in result.all():
                 if p.meta.get("stars_count") == parsed.stars_count:
+                    # Verify message timestamp is not older than payment creation
+                    if message_date and p.created_at > (
+                        message_date + timedelta(seconds=10)
+                    ):
+                        continue
                     matched_payment = p
                     break
 
     elif parsed.scenario_id == "helperstars_bot":
-        # 1. Match by order_id if present in meta
+        # 1. Match by order_id if payment already has it in meta
         if parsed.order_id:
             stmt = (
                 select(Payment)
@@ -236,24 +273,9 @@ async def process_bot_notification(
                     matched_payment = p
                     break
 
-        # 2. Match by unique allocated stars_count (+1..+10)
+        # 2. Match by unique allocated stars_count (+1..+10) ONLY for payments
+        # that don't have a mismatched order_id
         if not matched_payment and parsed.stars_count:
-            stmt = (
-                select(Payment)
-                .where(
-                    Payment.scenario_id == "helperstars_bot",
-                    Payment.status == PaymentStatus.PENDING,
-                )
-                .order_by(col(Payment.created_at).desc())
-            )
-            result = await session.exec(stmt)
-            for p in result.all():
-                if p.meta.get("stars_count") == parsed.stars_count:
-                    matched_payment = p
-                    break
-
-        # 3. Fallback match by account_id
-        if not matched_payment:
             stmt = (
                 select(Payment)
                 .where(
@@ -264,10 +286,23 @@ async def process_bot_notification(
                 .order_by(col(Payment.created_at).desc())
             )
             result = await session.exec(stmt)
-            matched_payment = result.first()
+            for p in result.all():
+                # If payment has an order_id that differs from parsed.order_id,
+                # do NOT match
+                p_order = p.meta.get("order_id")
+                if p_order and parsed.order_id and p_order != parsed.order_id:
+                    continue
+                if p.meta.get("stars_count") == parsed.stars_count:
+                    if message_date and p.created_at > (
+                        message_date + timedelta(seconds=10)
+                    ):
+                        continue
+                    matched_payment = p
+                    break
+        # Note: NEVER fall back to arbitrary first pending payment!
 
     elif parsed.scenario_id == "starslly_bot":
-        # On this account, only 1 pending Starsly order can exist at a time
+        # Find active pending payment on this account
         stmt = (
             select(Payment)
             .where(
@@ -278,7 +313,22 @@ async def process_bot_notification(
             .order_by(col(Payment.created_at).desc())
         )
         result = await session.exec(stmt)
-        matched_payment = result.first()
+        candidate = result.first()
+        if candidate:
+            # Ensure message does not predate payment creation
+            if message_date and candidate.created_at > (
+                message_date + timedelta(seconds=10)
+            ):
+                logger.warning(
+                    "starslly_notification_predates_payment",
+                    account_id=str(account_id),
+                    payment_id=str(candidate.id),
+                    payment_created=candidate.created_at.isoformat(),
+                    message_date=message_date.isoformat(),
+                )
+                matched_payment = None
+            else:
+                matched_payment = candidate
 
     if not matched_payment:
         logger.warning(
@@ -287,7 +337,19 @@ async def process_bot_notification(
             scenario_id=parsed.scenario_id,
             order_id=parsed.order_id,
             stars_count=parsed.stars_count,
+            message_id=message_id,
         )
+        if message_id is not None:
+            unmatched_event = NotificationEvent(
+                account_id=account_id,
+                bot_username=sender_username,
+                message_id=message_id,
+                message_date=message_date,
+                status="unmatched",
+                raw_text=message_text,
+            )
+            session.add(unmatched_event)
+            await session.flush()
         return None
 
     # Update metadata with confirmed details
@@ -310,12 +372,26 @@ async def process_bot_notification(
         ),
     )
 
+    if message_id is not None:
+        processed_event = NotificationEvent(
+            account_id=account_id,
+            bot_username=sender_username,
+            message_id=message_id,
+            message_date=message_date,
+            status="processed",
+            payment_id=updated_payment.id,
+            raw_text=message_text,
+        )
+        session.add(processed_event)
+        await session.flush()
+
     logger.info(
         "payment_successfully_confirmed_via_bot",
         payment_id=str(updated_payment.id),
         scenario_id=updated_payment.scenario_id,
         account_id=str(account_id),
         order_id=parsed.order_id,
+        message_id=message_id,
     )
     return updated_payment
 
@@ -326,6 +402,7 @@ async def check_all_pending_payments_notifications(
     """
     Safety fallback scanner: checks recent messages from payment bots
     for all active PENDING payments in case an MTProto real-time event was missed.
+    Passes message_id and timestamp to avoid false confirmations.
     """
     from app.modules.accounts.models import AccountStatus, TelegramAccount
     from app.modules.accounts.session_pool import telegram_session_pool
@@ -375,11 +452,24 @@ async def check_all_pending_payments_notifications(
                         if not msg or not getattr(msg, "text", ""):
                             continue
                         if not getattr(msg, "out", False):
+                            raw_id = getattr(msg, "id", None)
+                            msg_id = (
+                                int(raw_id)
+                                if isinstance(raw_id, int)
+                                and not isinstance(raw_id, bool)
+                                else None
+                            )
+                            raw_date = getattr(msg, "date", None)
+                            msg_date = (
+                                raw_date if isinstance(raw_date, datetime) else None
+                            )
                             confirmed = await process_bot_notification(
                                 session=session,
                                 account_id=account_id,
                                 sender_username=bot_username,
                                 message_text=msg.text,
+                                message_id=msg_id,
+                                message_date=msg_date,
                             )
                             if confirmed:
                                 confirmed_count += 1

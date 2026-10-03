@@ -195,3 +195,29 @@ async def test_create_payment_race_api_sse(
 
     assert "started" in event_types
     assert "done" in event_types
+
+
+@pytest.mark.asyncio
+async def test_release_all_accounts_api(
+    client: AsyncClient, db_session: AsyncSession
+) -> None:
+    """Test POST /api/v1/payments/release-all-accounts frees locked accounts."""
+    await _create_test_account(db_session, "Release Test Acc")
+
+    # Create pending payment
+    p_resp = await client.post(
+        "/api/v1/payments/",
+        json={
+            "client_user_id": "test_release_user",
+            "scenario_id": "mock_bot",
+            "amount": "150.00",
+        },
+    )
+    assert p_resp.status_code == 201
+
+    # Call release-all-accounts
+    rel_resp = await client.post("/api/v1/payments/release-all-accounts")
+    assert rel_resp.status_code == 200
+    data = rel_resp.json()
+    assert data["cancelled_payments_count"] >= 1
+    assert data["released_accounts_count"] >= 1

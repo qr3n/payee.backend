@@ -156,3 +156,11 @@ class CheckAllAccountsResponse(BaseModel):
     banned: int = 0
     flood_wait: int = 0
     error: int = 0
+
+
+class ReleaseAccountsResponse(BaseModel):
+    """Result of releasing all locked accounts."""
+
+    cancelled_payments_count: int
+    released_accounts_count: int
+    message: str

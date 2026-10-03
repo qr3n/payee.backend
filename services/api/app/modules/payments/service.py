@@ -321,6 +321,38 @@ async def expire_overdue_payments(session: AsyncSession) -> int:
     return len(overdue)
 
 
+async def release_all_locked_accounts(session: AsyncSession) -> tuple[int, int]:
+    """
+    Cancel all active PENDING payments to immediately free all reserved
+    Telegram accounts. Returns (cancelled_payments_count, released_accounts_count).
+    """
+    now = datetime.now(UTC)
+    statement = select(Payment).where(
+        Payment.status == PaymentStatus.PENDING,
+        Payment.expires_at > now,
+    )
+    result = await session.exec(statement)
+    active_pending = result.all()
+
+    released_account_ids: set[UUID] = set()
+    for payment in active_pending:
+        payment.status = PaymentStatus.CANCELLED
+        payment.cancelled_at = now
+        if payment.account_id:
+            released_account_ids.add(payment.account_id)
+        session.add(payment)
+
+    if active_pending:
+        await session.flush()
+
+    logger.info(
+        "all_locked_accounts_released",
+        cancelled_payments=len(active_pending),
+        released_accounts=len(released_account_ids),
+    )
+    return len(active_pending), len(released_account_ids)
+
+
 async def prepare_account_scenarios(
     session: AsyncSession,
     account_id: UUID,

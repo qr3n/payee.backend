@@ -29,6 +29,7 @@ from app.modules.payments.service import (
     get_payment,
     list_payments_paginated,
     mark_payment_status,
+    release_all_locked_accounts,
 )
 from app.shared.pagination import PageParams
 from tests.test_accounts_service import VALID_SESSION_STRING
@@ -249,6 +250,47 @@ async def test_expire_overdue_payments(db_session: AsyncSession) -> None:
     refreshed = await get_payment(db_session, p.id)
     assert refreshed is not None
     assert refreshed.status == PaymentStatus.EXPIRED
+
+
+@pytest.mark.asyncio
+async def test_release_all_locked_accounts(db_session: AsyncSession) -> None:
+    """Test releasing all locked accounts cancels pending payments."""
+    acc1 = await _create_test_account(db_session, "Locked Acc 1")
+    acc2 = await _create_test_account(db_session, "Locked Acc 2")
+
+    p1 = await create_payment(
+        db_session,
+        PaymentCreate(
+            client_user_id="u1",
+            scenario_id="mock_bot",
+            amount=Decimal("100.00"),
+        ),
+    )
+    p2 = await create_payment(
+        db_session,
+        PaymentCreate(
+            client_user_id="u2",
+            scenario_id="mock_bot",
+            amount=Decimal("200.00"),
+        ),
+    )
+    assert p1.status == PaymentStatus.PENDING
+    assert p2.status == PaymentStatus.PENDING
+
+    cancelled_count, released_count = await release_all_locked_accounts(db_session)
+    assert cancelled_count == 2
+    assert released_count == 2
+
+    # Verify both accounts are now free for new payments
+    p3 = await create_payment(
+        db_session,
+        PaymentCreate(
+            client_user_id="u3",
+            scenario_id="mock_bot",
+            amount=Decimal("300.00"),
+        ),
+    )
+    assert p3.account_id in (acc1.id, acc2.id)
 
 
 @pytest.mark.asyncio

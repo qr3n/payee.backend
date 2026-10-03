@@ -503,3 +503,31 @@ async def test_client_prepare_account() -> None:
         assert "dispatched" in res["message"]
     finally:
         await api_client.close()
+
+
+@pytest.mark.asyncio
+async def test_client_release_all_accounts() -> None:
+    def handler(request: httpx.Request) -> httpx.Response:
+        assert request.url.path == "/api/v1/payments/release-all-accounts"
+        assert request.method == "POST"
+        return httpx.Response(
+            200,
+            json={
+                "cancelled_payments_count": 2,
+                "released_accounts_count": 2,
+                "message": "Успешно освобождено аккаунтов: 2",
+            },
+        )
+
+    transport = httpx.MockTransport(handler)
+    api_client = ApiClient(base_url="http://test-server")
+    api_client._client = httpx.AsyncClient(
+        transport=transport, base_url="http://test-server"
+    )
+
+    try:
+        res = await api_client.release_all_accounts()
+        assert res.cancelled_payments_count == 2
+        assert res.released_accounts_count == 2
+    finally:
+        await api_client.close()

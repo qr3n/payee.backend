@@ -18,6 +18,7 @@ from app.modules.payments.schemas import (
     PaymentCreate,
     PaymentRaceCreate,
     PaymentRead,
+    ReleaseAccountsResponse,
     ScenarioRead,
 )
 from app.shared.pagination import PageParams, PaginatedResponse
@@ -202,3 +203,27 @@ async def handle_payment_callback(
         session=db, db_payment=payment, callback=callback
     )
     return PaymentRead.model_validate(updated)
+
+
+@router.post(
+    "/release-all-accounts",
+    response_model=ReleaseAccountsResponse,
+    summary="Release all locked accounts",
+    description=(
+        "Cancels all active pending payments and releases all "
+        "reserved Telegram accounts."
+    ),
+)
+async def release_all_accounts_endpoint(
+    db: AsyncSession = Depends(get_db),
+) -> ReleaseAccountsResponse:
+    """Immediately unlock all accounts by cancelling active pending payments."""
+    cancelled, released = await payment_service.release_all_locked_accounts(session=db)
+    return ReleaseAccountsResponse(
+        cancelled_payments_count=cancelled,
+        released_accounts_count=released,
+        message=(
+            f"Успешно освобождено аккаунтов: {released} "
+            f"(отменено платежей: {cancelled})"
+        ),
+    )

@@ -92,20 +92,20 @@
         }
       }
     },
-    "/api/v1/items/": {
+    "/api/v1/accounts/": {
       "post": {
         "tags": [
-          "Items"
+          "Telegram Accounts"
         ],
-        "summary": "Create a new item",
-        "description": "Creates a new item record in PostgreSQL using SQLModel.",
-        "operationId": "create_item_api_v1_items__post",
+        "summary": "Add Telegram account",
+        "description": "Registers a new Telegram account with automated device profile generation and optional proxy.",
+        "operationId": "create_account_api_v1_accounts__post",
         "requestBody": {
           "required": true,
           "content": {
             "application/json": {
               "schema": {
-                "$ref": "#/components/schemas/ItemCreate"
+                "$ref": "#/components/schemas/TelegramAccountCreate"
               }
             }
           }
@@ -116,7 +116,7 @@
             "content": {
               "application/json": {
                 "schema": {
-                  "$ref": "#/components/schemas/ItemRead"
+                  "$ref": "#/components/schemas/TelegramAccountRead"
                 }
               }
             }
@@ -135,11 +135,11 @@
       },
       "get": {
         "tags": [
-          "Items"
+          "Telegram Accounts"
         ],
-        "summary": "List items",
-        "description": "Retrieve a paginated list of items ordered by creation time.",
-        "operationId": "list_items_api_v1_items__get",
+        "summary": "List Telegram accounts",
+        "description": "Retrieve paginated list of registered Telegram accounts.",
+        "operationId": "list_accounts_api_v1_accounts__get",
         "parameters": [
           {
             "name": "page",
@@ -171,7 +171,7 @@
             "content": {
               "application/json": {
                 "schema": {
-                  "$ref": "#/components/schemas/PaginatedResponse_ItemRead_"
+                  "$ref": "#/components/schemas/PaginatedResponse_TelegramAccountRead_"
                 }
               }
             }
@@ -189,29 +189,435 @@
         }
       }
     },
-    "/api/v1/items/cursor": {
+    "/api/v1/accounts/upload": {
+      "post": {
+        "tags": [
+          "Telegram Accounts"
+        ],
+        "summary": "Upload .session and .json pair",
+        "description": "Upload a Telethon .session file along with its client .json metadata. Automatically extracts app_id, app_hash, device profile, and proxy.",
+        "operationId": "upload_account_session_api_v1_accounts_upload_post",
+        "requestBody": {
+          "content": {
+            "multipart/form-data": {
+              "schema": {
+                "$ref": "#/components/schemas/Body_upload_account_session_api_v1_accounts_upload_post"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "201": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/TelegramAccountRead"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/v1/accounts/auth/send-code": {
+      "post": {
+        "tags": [
+          "Telegram Accounts"
+        ],
+        "summary": "Request Telegram login code via phone",
+        "description": "Initiates MTProto connection and sends confirmation code to Telegram.",
+        "operationId": "send_phone_code_api_v1_accounts_auth_send_code_post",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/PhoneCodeRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/PhoneCodeResponse"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/v1/accounts/auth/sign-in": {
+      "post": {
+        "tags": [
+          "Telegram Accounts"
+        ],
+        "summary": "Complete phone login with code or 2FA password",
+        "description": "Verifies Telegram code or cloud password and creates account in pool.",
+        "operationId": "sign_in_phone_api_v1_accounts_auth_sign_in_post",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/PhoneSignInRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/PhoneSignInResponse"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/v1/accounts/{account_id}": {
       "get": {
         "tags": [
-          "Items"
+          "Telegram Accounts"
         ],
-        "summary": "List items with cursor",
-        "description": "Retrieve items using high-performance keyset/cursor pagination.",
-        "operationId": "list_items_by_cursor_api_v1_items_cursor_get",
+        "summary": "Get Telegram account details",
+        "description": "Retrieve details for a specific Telegram account by UUID.",
+        "operationId": "get_account_api_v1_accounts__account_id__get",
         "parameters": [
           {
-            "name": "cursor",
+            "name": "account_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid",
+              "title": "Account Id"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/TelegramAccountRead"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      },
+      "patch": {
+        "tags": [
+          "Telegram Accounts"
+        ],
+        "summary": "Update Telegram account",
+        "description": "Partially update account metadata, proxy, or status.",
+        "operationId": "update_account_api_v1_accounts__account_id__patch",
+        "parameters": [
+          {
+            "name": "account_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid",
+              "title": "Account Id"
+            }
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/TelegramAccountUpdate"
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/TelegramAccountRead"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      },
+      "delete": {
+        "tags": [
+          "Telegram Accounts"
+        ],
+        "summary": "Delete Telegram account",
+        "description": "Permanently delete a Telegram account session.",
+        "operationId": "delete_account_api_v1_accounts__account_id__delete",
+        "parameters": [
+          {
+            "name": "account_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid",
+              "title": "Account Id"
+            }
+          }
+        ],
+        "responses": {
+          "204": {
+            "description": "Successful Response"
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/v1/accounts/{account_id}/check": {
+      "post": {
+        "tags": [
+          "Telegram Accounts"
+        ],
+        "summary": "Check Telegram account status",
+        "description": "Perform MTProto check via Telethon to verify session authorization and update profile info.",
+        "operationId": "check_account_status_api_v1_accounts__account_id__check_post",
+        "parameters": [
+          {
+            "name": "account_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid",
+              "title": "Account Id"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/TelegramAccountCheckResponse"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/v1/accounts/check-all": {
+      "post": {
+        "tags": [
+          "Telegram Accounts"
+        ],
+        "summary": "Batch verify all Telegram accounts",
+        "description": "Scans all non-disabled Telegram accounts, checks their MTProto status, updates database records, evicts revoked sessions, and alerts admins.",
+        "operationId": "check_all_accounts_endpoint_api_v1_accounts_check_all_post",
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/CheckAllAccountsResponse"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/v1/accounts/{account_id}/prepare": {
+      "post": {
+        "tags": [
+          "Telegram Accounts"
+        ],
+        "summary": "Prepare account for all payment scenarios",
+        "description": "Asynchronously joins required channels, runs /start, and prepares bot states for all scenarios.",
+        "operationId": "prepare_account_endpoint_api_v1_accounts__account_id__prepare_post",
+        "parameters": [
+          {
+            "name": "account_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid",
+              "title": "Account Id"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "additionalProperties": {
+                    "type": "string"
+                  },
+                  "title": "Response Prepare Account Endpoint Api V1 Accounts  Account Id  Prepare Post"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/v1/payments/": {
+      "post": {
+        "tags": [
+          "Payments"
+        ],
+        "summary": "Create payment invoice",
+        "description": "Reserves a free Telegram account for 30m and executes the requested bot scenario to generate an invoice link. Cancels previous pending payment from the same user and reuses their account.",
+        "operationId": "create_payment_api_v1_payments__post",
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/PaymentCreate"
+              }
+            }
+          }
+        },
+        "responses": {
+          "201": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/PaymentRead"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      },
+      "get": {
+        "tags": [
+          "Payments"
+        ],
+        "summary": "List payments",
+        "description": "Retrieve paginated list of payment transactions.",
+        "operationId": "list_payments_api_v1_payments__get",
+        "parameters": [
+          {
+            "name": "page",
             "in": "query",
             "required": false,
             "schema": {
-              "anyOf": [
-                {
-                  "type": "string"
-                },
-                {
-                  "type": "null"
-                }
-              ],
-              "title": "Cursor"
+              "type": "integer",
+              "minimum": 1,
+              "default": 1,
+              "title": "Page"
             }
           },
           {
@@ -233,7 +639,7 @@
             "content": {
               "application/json": {
                 "schema": {
-                  "$ref": "#/components/schemas/CursorPaginatedResponse_ItemRead_"
+                  "$ref": "#/components/schemas/PaginatedResponse_PaymentRead_"
                 }
               }
             }
@@ -251,23 +657,87 @@
         }
       }
     },
-    "/api/v1/items/{item_id}": {
+    "/api/v1/payments/race": {
+      "post": {
+        "tags": [
+          "Payments"
+        ],
+        "summary": "Race all scenarios (SSE)",
+        "description": "Runs all registered bot scenarios concurrently against all available accounts. Streams each successful payment link as a Server-Sent Event (SSE) as it is generated.\n\nSSE event types:\n- started: accounts locked\n- payment: link generated\n- error: scenario failed\n- done: race completed",
+        "operationId": "create_payment_race_api_v1_payments_race_post",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/PaymentRaceCreate"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "text/event-stream": {}
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/v1/payments/scenarios": {
       "get": {
         "tags": [
-          "Items"
+          "Payments"
         ],
-        "summary": "Get item by ID",
-        "description": "Retrieve details of a specific item by its UUID.",
-        "operationId": "get_item_api_v1_items__item_id__get",
+        "summary": "List available payment scenarios",
+        "description": "Retrieve all registered bot payment scenarios and strategies.",
+        "operationId": "list_scenarios_api_v1_payments_scenarios_get",
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "items": {
+                    "$ref": "#/components/schemas/ScenarioRead"
+                  },
+                  "type": "array",
+                  "title": "Response List Scenarios Api V1 Payments Scenarios Get"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/v1/payments/{payment_id}": {
+      "get": {
+        "tags": [
+          "Payments"
+        ],
+        "summary": "Get payment details",
+        "description": "Retrieve full details and status for a specific payment.",
+        "operationId": "get_payment_api_v1_payments__payment_id__get",
         "parameters": [
           {
-            "name": "item_id",
+            "name": "payment_id",
             "in": "path",
             "required": true,
             "schema": {
               "type": "string",
               "format": "uuid",
-              "title": "Item Id"
+              "title": "Payment Id"
             }
           }
         ],
@@ -277,7 +747,7 @@
             "content": {
               "application/json": {
                 "schema": {
-                  "$ref": "#/components/schemas/ItemRead"
+                  "$ref": "#/components/schemas/PaymentRead"
                 }
               }
             }
@@ -293,32 +763,41 @@
             }
           }
         }
-      },
-      "patch": {
+      }
+    },
+    "/api/v1/payments/{payment_id}/paid": {
+      "post": {
         "tags": [
-          "Items"
+          "Payments"
         ],
-        "summary": "Update item",
-        "description": "Partially update an existing item.",
-        "operationId": "update_item_api_v1_items__item_id__patch",
+        "summary": "Mark payment as paid",
+        "description": "Reactive payment confirmation callback. Immediately frees the reserved Telegram account back to the pool.",
+        "operationId": "mark_payment_paid_api_v1_payments__payment_id__paid_post",
         "parameters": [
           {
-            "name": "item_id",
+            "name": "payment_id",
             "in": "path",
             "required": true,
             "schema": {
               "type": "string",
               "format": "uuid",
-              "title": "Item Id"
+              "title": "Payment Id"
             }
           }
         ],
         "requestBody": {
-          "required": true,
           "content": {
             "application/json": {
               "schema": {
-                "$ref": "#/components/schemas/ItemUpdate"
+                "anyOf": [
+                  {
+                    "$ref": "#/components/schemas/PaymentCallback"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ],
+                "title": "Callback"
               }
             }
           }
@@ -329,45 +808,10 @@
             "content": {
               "application/json": {
                 "schema": {
-                  "$ref": "#/components/schemas/ItemRead"
+                  "$ref": "#/components/schemas/PaymentRead"
                 }
               }
             }
-          },
-          "422": {
-            "description": "Validation Error",
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/HTTPValidationError"
-                }
-              }
-            }
-          }
-        }
-      },
-      "delete": {
-        "tags": [
-          "Items"
-        ],
-        "summary": "Delete item",
-        "description": "Permanently delete an item by its UUID.",
-        "operationId": "delete_item_api_v1_items__item_id__delete",
-        "parameters": [
-          {
-            "name": "item_id",
-            "in": "path",
-            "required": true,
-            "schema": {
-              "type": "string",
-              "format": "uuid",
-              "title": "Item Id"
-            }
-          }
-        ],
-        "responses": {
-          "204": {
-            "description": "Successful Response"
           },
           "422": {
             "description": "Validation Error",
@@ -382,37 +826,33 @@
         }
       }
     },
-    "/api/v1/items/{item_id}/analyze": {
+    "/api/v1/payments/{payment_id}/cancel": {
       "post": {
         "tags": [
-          "Items"
+          "Payments"
         ],
-        "summary": "Enqueue background analysis for item",
-        "description": "Dispatches a background worker task using Taskiq to process item analysis.",
-        "operationId": "analyze_item_api_v1_items__item_id__analyze_post",
+        "summary": "Cancel payment",
+        "description": "Cancels a pending payment and immediately frees its Telegram account.",
+        "operationId": "cancel_payment_api_v1_payments__payment_id__cancel_post",
         "parameters": [
           {
-            "name": "item_id",
+            "name": "payment_id",
             "in": "path",
             "required": true,
             "schema": {
               "type": "string",
               "format": "uuid",
-              "title": "Item Id"
+              "title": "Payment Id"
             }
           }
         ],
         "responses": {
-          "202": {
+          "200": {
             "description": "Successful Response",
             "content": {
               "application/json": {
                 "schema": {
-                  "type": "object",
-                  "additionalProperties": {
-                    "type": "string"
-                  },
-                  "title": "Response Analyze Item Api V1 Items  Item Id  Analyze Post"
+                  "$ref": "#/components/schemas/PaymentRead"
                 }
               }
             }
@@ -423,6 +863,82 @@
               "application/json": {
                 "schema": {
                   "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/v1/payments/{payment_id}/callback": {
+      "post": {
+        "tags": [
+          "Payments"
+        ],
+        "summary": "Generic payment status callback",
+        "description": "Updates payment status via webhook and reactively handles account locking.",
+        "operationId": "handle_payment_callback_api_v1_payments__payment_id__callback_post",
+        "parameters": [
+          {
+            "name": "payment_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid",
+              "title": "Payment Id"
+            }
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/PaymentCallback"
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/PaymentRead"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/v1/payments/release-all-accounts": {
+      "post": {
+        "tags": [
+          "Payments"
+        ],
+        "summary": "Release all locked accounts",
+        "description": "Cancels all active pending payments and releases all reserved Telegram accounts.",
+        "operationId": "release_all_accounts_endpoint_api_v1_payments_release_all_accounts_post",
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ReleaseAccountsResponse"
                 }
               }
             }
@@ -433,17 +949,34 @@
   },
   "components": {
     "schemas": {
-      "CursorPaginatedResponse_ItemRead_": {
+      "AccountStatus": {
+        "type": "string",
+        "enum": [
+          "active",
+          "banned",
+          "revoked",
+          "flood_wait",
+          "error",
+          "disabled"
+        ],
+        "title": "AccountStatus",
+        "description": "Operational status of a Telegram account."
+      },
+      "Body_upload_account_session_api_v1_accounts_upload_post": {
         "properties": {
-          "items": {
-            "items": {
-              "$ref": "#/components/schemas/ItemRead"
-            },
-            "type": "array",
-            "title": "Items",
-            "description": "List of records for the current page"
+          "session_file": {
+            "type": "string",
+            "contentMediaType": "application/octet-stream",
+            "title": "Session File",
+            "description": "Telethon .session file"
           },
-          "next_cursor": {
+          "json_file": {
+            "type": "string",
+            "contentMediaType": "application/octet-stream",
+            "title": "Json File",
+            "description": "Client metadata .json file"
+          },
+          "title": {
             "anyOf": [
               {
                 "type": "string"
@@ -452,27 +985,79 @@
                 "type": "null"
               }
             ],
-            "title": "Next Cursor",
-            "description": "Cursor token for fetching subsequent page, or null if at end"
+            "title": "Title",
+            "description": "Optional account label"
           },
-          "has_more": {
+          "proxy_url": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Proxy Url",
+            "description": "Optional proxy override"
+          },
+          "verify": {
             "type": "boolean",
-            "title": "Has More",
-            "description": "Indicates whether more items are available",
-            "default": false
-          },
-          "size": {
-            "type": "integer",
-            "title": "Size",
-            "description": "Requested page size limit"
+            "title": "Verify",
+            "description": "Verify session via MTProto",
+            "default": true
           }
         },
         "type": "object",
         "required": [
-          "items",
-          "size"
+          "session_file",
+          "json_file"
         ],
-        "title": "CursorPaginatedResponse[ItemRead]"
+        "title": "Body_upload_account_session_api_v1_accounts_upload_post"
+      },
+      "CheckAllAccountsResponse": {
+        "properties": {
+          "total": {
+            "type": "integer",
+            "title": "Total",
+            "description": "Total non-disabled accounts scanned"
+          },
+          "active": {
+            "type": "integer",
+            "title": "Active",
+            "description": "Number of currently active/authorized accounts",
+            "default": 0
+          },
+          "revoked": {
+            "type": "integer",
+            "title": "Revoked",
+            "description": "Number of revoked or unauthorized sessions",
+            "default": 0
+          },
+          "banned": {
+            "type": "integer",
+            "title": "Banned",
+            "description": "Number of banned accounts",
+            "default": 0
+          },
+          "flood_wait": {
+            "type": "integer",
+            "title": "Flood Wait",
+            "description": "Number of accounts under flood wait",
+            "default": 0
+          },
+          "error": {
+            "type": "integer",
+            "title": "Error",
+            "description": "Number of accounts that produced an error",
+            "default": 0
+          }
+        },
+        "type": "object",
+        "required": [
+          "total"
+        ],
+        "title": "CheckAllAccountsResponse",
+        "description": "Aggregated results of batch account health verification."
       },
       "HTTPValidationError": {
         "properties": {
@@ -537,174 +1122,11 @@
         ],
         "title": "HealthCheckResponse"
       },
-      "ItemCreate": {
-        "properties": {
-          "title": {
-            "type": "string",
-            "maxLength": 255,
-            "minLength": 1,
-            "title": "Title",
-            "description": "Title or name of the item",
-            "examples": [
-              "Project Alpha"
-            ]
-          },
-          "description": {
-            "anyOf": [
-              {
-                "type": "string",
-                "maxLength": 1000
-              },
-              {
-                "type": "null"
-              }
-            ],
-            "title": "Description",
-            "description": "Detailed description of the item",
-            "examples": [
-              "A high-priority backend development project."
-            ]
-          },
-          "is_active": {
-            "type": "boolean",
-            "title": "Is Active",
-            "description": "Operational status flag",
-            "default": true
-          }
-        },
-        "type": "object",
-        "required": [
-          "title"
-        ],
-        "title": "ItemCreate",
-        "description": "Schema for creating a new Item."
-      },
-      "ItemRead": {
-        "properties": {
-          "title": {
-            "type": "string",
-            "maxLength": 255,
-            "minLength": 1,
-            "title": "Title",
-            "description": "Title or name of the item",
-            "examples": [
-              "Project Alpha"
-            ]
-          },
-          "description": {
-            "anyOf": [
-              {
-                "type": "string",
-                "maxLength": 1000
-              },
-              {
-                "type": "null"
-              }
-            ],
-            "title": "Description",
-            "description": "Detailed description of the item",
-            "examples": [
-              "A high-priority backend development project."
-            ]
-          },
-          "is_active": {
-            "type": "boolean",
-            "title": "Is Active",
-            "description": "Operational status flag",
-            "default": true
-          },
-          "id": {
-            "type": "string",
-            "format": "uuid",
-            "title": "Id",
-            "description": "Unique identifier (UUIDv7, monotonic time-ordered)",
-            "examples": [
-              "01923d8c-7f51-789a-b456-c78901234567"
-            ]
-          },
-          "created_at": {
-            "type": "string",
-            "format": "date-time",
-            "title": "Created At",
-            "description": "UTC creation timestamp"
-          },
-          "updated_at": {
-            "type": "string",
-            "format": "date-time",
-            "title": "Updated At",
-            "description": "UTC last update timestamp"
-          }
-        },
-        "type": "object",
-        "required": [
-          "title",
-          "id",
-          "created_at",
-          "updated_at"
-        ],
-        "title": "ItemRead",
-        "description": "Schema for returning Item details in API responses."
-      },
-      "ItemUpdate": {
-        "properties": {
-          "title": {
-            "anyOf": [
-              {
-                "type": "string",
-                "maxLength": 255,
-                "minLength": 1
-              },
-              {
-                "type": "null"
-              }
-            ],
-            "title": "Title",
-            "description": "New title for the item",
-            "examples": [
-              "Updated Project Title"
-            ]
-          },
-          "description": {
-            "anyOf": [
-              {
-                "type": "string",
-                "maxLength": 1000
-              },
-              {
-                "type": "null"
-              }
-            ],
-            "title": "Description",
-            "description": "New description",
-            "examples": [
-              "Updated project details."
-            ]
-          },
-          "is_active": {
-            "anyOf": [
-              {
-                "type": "boolean"
-              },
-              {
-                "type": "null"
-              }
-            ],
-            "title": "Is Active",
-            "description": "New operational status",
-            "examples": [
-              false
-            ]
-          }
-        },
-        "type": "object",
-        "title": "ItemUpdate",
-        "description": "Schema for updating an existing Item (partial updates supported)."
-      },
-      "PaginatedResponse_ItemRead_": {
+      "PaginatedResponse_PaymentRead_": {
         "properties": {
           "items": {
             "items": {
-              "$ref": "#/components/schemas/ItemRead"
+              "$ref": "#/components/schemas/PaymentRead"
             },
             "type": "array",
             "title": "Items",
@@ -739,7 +1161,566 @@
           "size",
           "pages"
         ],
-        "title": "PaginatedResponse[ItemRead]"
+        "title": "PaginatedResponse[PaymentRead]"
+      },
+      "PaginatedResponse_TelegramAccountRead_": {
+        "properties": {
+          "items": {
+            "items": {
+              "$ref": "#/components/schemas/TelegramAccountRead"
+            },
+            "type": "array",
+            "title": "Items",
+            "description": "List of records for the current page"
+          },
+          "total": {
+            "type": "integer",
+            "title": "Total",
+            "description": "Total count of records matching criteria"
+          },
+          "page": {
+            "type": "integer",
+            "title": "Page",
+            "description": "Current page number"
+          },
+          "size": {
+            "type": "integer",
+            "title": "Size",
+            "description": "Requested page size limit"
+          },
+          "pages": {
+            "type": "integer",
+            "title": "Pages",
+            "description": "Total number of available pages"
+          }
+        },
+        "type": "object",
+        "required": [
+          "items",
+          "total",
+          "page",
+          "size",
+          "pages"
+        ],
+        "title": "PaginatedResponse[TelegramAccountRead]"
+      },
+      "PaymentCallback": {
+        "properties": {
+          "status": {
+            "$ref": "#/components/schemas/PaymentStatus",
+            "description": "Target status (e.g. paid, cancelled, failed)",
+            "default": "paid"
+          },
+          "external_transaction_id": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "External Transaction Id",
+            "description": "External transaction reference ID"
+          },
+          "meta": {
+            "additionalProperties": true,
+            "type": "object",
+            "title": "Meta",
+            "description": "Additional callback payload or provider response"
+          }
+        },
+        "type": "object",
+        "title": "PaymentCallback",
+        "description": "Payload sent by webhooks or external providers to update payment status."
+      },
+      "PaymentCreate": {
+        "properties": {
+          "client_user_id": {
+            "type": "string",
+            "maxLength": 128,
+            "minLength": 1,
+            "title": "Client User Id",
+            "description": "External client/user identifier requesting the payment",
+            "examples": [
+              "user_987654"
+            ]
+          },
+          "scenario_id": {
+            "type": "string",
+            "maxLength": 64,
+            "minLength": 1,
+            "title": "Scenario Id",
+            "description": "Payment scenario identifier to execute",
+            "examples": [
+              "demo_bot"
+            ]
+          },
+          "amount": {
+            "anyOf": [
+              {
+                "type": "number",
+                "exclusiveMinimum": 0.0
+              },
+              {
+                "type": "string",
+                "pattern": "^(?!^[-+.]*$)[+-]?0*\\d*\\.?\\d*$"
+              }
+            ],
+            "title": "Amount",
+            "description": "Monetary amount (must be positive)",
+            "examples": [
+              "500.00"
+            ]
+          },
+          "currency": {
+            "type": "string",
+            "maxLength": 16,
+            "title": "Currency",
+            "description": "Currency code (e.g. RUB, USDT, USD, XTR)",
+            "default": "RUB",
+            "examples": [
+              "RUB"
+            ]
+          },
+          "meta": {
+            "additionalProperties": true,
+            "type": "object",
+            "title": "Meta",
+            "description": "Scenario-specific arguments (e.g. order_id, product_name)",
+            "examples": [
+              {
+                "order_id": "ORD-12345"
+              }
+            ]
+          }
+        },
+        "type": "object",
+        "required": [
+          "client_user_id",
+          "scenario_id",
+          "amount"
+        ],
+        "title": "PaymentCreate",
+        "description": "Input payload for initiating a payment request."
+      },
+      "PaymentRaceCreate": {
+        "properties": {
+          "client_user_id": {
+            "type": "string",
+            "maxLength": 128,
+            "minLength": 1,
+            "title": "Client User Id",
+            "description": "External client/user identifier requesting the payment",
+            "examples": [
+              "user_987654"
+            ]
+          },
+          "amount": {
+            "anyOf": [
+              {
+                "type": "number",
+                "exclusiveMinimum": 0.0
+              },
+              {
+                "type": "string",
+                "pattern": "^(?!^[-+.]*$)[+-]?0*\\d*\\.?\\d*$"
+              }
+            ],
+            "title": "Amount",
+            "description": "Monetary amount (must be positive)",
+            "examples": [
+              "500.00"
+            ]
+          },
+          "currency": {
+            "type": "string",
+            "maxLength": 16,
+            "title": "Currency",
+            "description": "Currency code (e.g. RUB, USDT, USD)",
+            "default": "RUB",
+            "examples": [
+              "RUB"
+            ]
+          },
+          "timeout_sec": {
+            "type": "number",
+            "maximum": 300.0,
+            "exclusiveMinimum": 0.0,
+            "title": "Timeout Sec",
+            "description": "Maximum seconds to wait for all scenarios to complete",
+            "default": 120.0,
+            "examples": [
+              120.0
+            ]
+          },
+          "meta": {
+            "additionalProperties": true,
+            "type": "object",
+            "title": "Meta",
+            "description": "Additional scenario-specific arguments",
+            "examples": [
+              {}
+            ]
+          }
+        },
+        "type": "object",
+        "required": [
+          "client_user_id",
+          "amount"
+        ],
+        "title": "PaymentRaceCreate",
+        "description": "Input payload for initiating a concurrent multi-scenario payment race."
+      },
+      "PaymentRead": {
+        "properties": {
+          "id": {
+            "type": "string",
+            "format": "uuid",
+            "title": "Id",
+            "description": "Unique payment ID (UUIDv7)"
+          },
+          "client_user_id": {
+            "type": "string",
+            "title": "Client User Id",
+            "description": "Client/user identifier"
+          },
+          "account_id": {
+            "anyOf": [
+              {
+                "type": "string",
+                "format": "uuid"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Account Id",
+            "description": "Assigned Telegram account ID"
+          },
+          "batch_id": {
+            "anyOf": [
+              {
+                "type": "string",
+                "format": "uuid"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Batch Id",
+            "description": "Race batch ID (groups multiple scenario results)"
+          },
+          "scenario_id": {
+            "type": "string",
+            "title": "Scenario Id",
+            "description": "Executed payment scenario ID"
+          },
+          "amount": {
+            "type": "string",
+            "pattern": "^(?!^[-+.]*$)[+-]?0*\\d*\\.?\\d*$",
+            "title": "Amount",
+            "description": "Payment amount"
+          },
+          "currency": {
+            "type": "string",
+            "title": "Currency",
+            "description": "Payment currency"
+          },
+          "status": {
+            "$ref": "#/components/schemas/PaymentStatus",
+            "description": "Current payment status"
+          },
+          "payment_link": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Payment Link",
+            "description": "Generated payment/invoice URL"
+          },
+          "expires_at": {
+            "type": "string",
+            "format": "date-time",
+            "title": "Expires At",
+            "description": "UTC expiration deadline"
+          },
+          "paid_at": {
+            "anyOf": [
+              {
+                "type": "string",
+                "format": "date-time"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Paid At",
+            "description": "UTC payment completion timestamp"
+          },
+          "cancelled_at": {
+            "anyOf": [
+              {
+                "type": "string",
+                "format": "date-time"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Cancelled At",
+            "description": "UTC cancellation timestamp"
+          },
+          "meta": {
+            "additionalProperties": true,
+            "type": "object",
+            "title": "Meta",
+            "description": "Scenario payload and responses"
+          },
+          "created_at": {
+            "type": "string",
+            "format": "date-time",
+            "title": "Created At",
+            "description": "Creation timestamp"
+          },
+          "updated_at": {
+            "type": "string",
+            "format": "date-time",
+            "title": "Updated At",
+            "description": "Last update timestamp"
+          }
+        },
+        "type": "object",
+        "required": [
+          "id",
+          "client_user_id",
+          "scenario_id",
+          "amount",
+          "currency",
+          "status",
+          "payment_link",
+          "expires_at",
+          "paid_at",
+          "cancelled_at",
+          "meta",
+          "created_at",
+          "updated_at"
+        ],
+        "title": "PaymentRead",
+        "description": "Response representation of a Payment entity."
+      },
+      "PaymentStatus": {
+        "type": "string",
+        "enum": [
+          "pending",
+          "paid",
+          "cancelled",
+          "expired",
+          "failed"
+        ],
+        "title": "PaymentStatus",
+        "description": "Lifecycle statuses for a payment transaction."
+      },
+      "PhoneCodeRequest": {
+        "properties": {
+          "phone": {
+            "type": "string",
+            "maxLength": 32,
+            "minLength": 7,
+            "title": "Phone",
+            "description": "Phone number in international format (+7...)",
+            "examples": [
+              "+79991234567"
+            ]
+          },
+          "title": {
+            "anyOf": [
+              {
+                "type": "string",
+                "maxLength": 128
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Title",
+            "description": "Optional friendly account label"
+          },
+          "api_id": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Api Id",
+            "description": "Optional Telegram API ID"
+          },
+          "api_hash": {
+            "anyOf": [
+              {
+                "type": "string",
+                "maxLength": 64
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Api Hash",
+            "description": "Optional Telegram API Hash"
+          },
+          "proxy_url": {
+            "anyOf": [
+              {
+                "type": "string",
+                "maxLength": 512
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Proxy Url",
+            "description": "Optional proxy URL"
+          }
+        },
+        "type": "object",
+        "required": [
+          "phone"
+        ],
+        "title": "PhoneCodeRequest",
+        "description": "Payload to request Telegram confirmation code for a phone number."
+      },
+      "PhoneCodeResponse": {
+        "properties": {
+          "phone_code_hash": {
+            "type": "string",
+            "title": "Phone Code Hash",
+            "description": "Hash identifying this auth session"
+          },
+          "timeout_seconds": {
+            "type": "integer",
+            "title": "Timeout Seconds",
+            "description": "Seconds until code expires",
+            "default": 120
+          },
+          "phone": {
+            "type": "string",
+            "title": "Phone",
+            "description": "Sanitized phone number"
+          }
+        },
+        "type": "object",
+        "required": [
+          "phone_code_hash",
+          "phone"
+        ],
+        "title": "PhoneCodeResponse",
+        "description": "Response returned after Telegram sends login code."
+      },
+      "PhoneSignInRequest": {
+        "properties": {
+          "phone_code_hash": {
+            "type": "string",
+            "title": "Phone Code Hash",
+            "description": "Hash from send-code step"
+          },
+          "code": {
+            "type": "string",
+            "title": "Code",
+            "description": "Telegram confirmation code received via SMS or Telegram",
+            "default": ""
+          },
+          "phone": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Phone",
+            "description": "Optional phone number"
+          },
+          "two_fa_password": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Two Fa Password",
+            "description": "Cloud 2FA password if required"
+          }
+        },
+        "type": "object",
+        "required": [
+          "phone_code_hash"
+        ],
+        "title": "PhoneSignInRequest",
+        "description": "Payload to complete sign-in using phone code or 2FA cloud password."
+      },
+      "PhoneSignInResponse": {
+        "properties": {
+          "status": {
+            "type": "string",
+            "title": "Status",
+            "description": "Result status: 'success' or 'needs_2fa'",
+            "examples": [
+              "success",
+              "needs_2fa"
+            ]
+          },
+          "account": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/TelegramAccountRead"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "description": "Authorized account details on success"
+          },
+          "message": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Message",
+            "description": "Informative message or instructions"
+          },
+          "phone_code_hash": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Phone Code Hash",
+            "description": "Phone code hash if 2FA is needed"
+          }
+        },
+        "type": "object",
+        "required": [
+          "status"
+        ],
+        "title": "PhoneSignInResponse",
+        "description": "Response returned upon sign-in attempt."
       },
       "ReadinessResponse": {
         "properties": {
@@ -781,6 +1762,743 @@
           "redis"
         ],
         "title": "ReadinessResponse"
+      },
+      "ReleaseAccountsResponse": {
+        "properties": {
+          "cancelled_payments_count": {
+            "type": "integer",
+            "title": "Cancelled Payments Count",
+            "description": "Number of active pending payments cancelled"
+          },
+          "released_accounts_count": {
+            "type": "integer",
+            "title": "Released Accounts Count",
+            "description": "Number of distinct Telegram accounts unlocked"
+          },
+          "message": {
+            "type": "string",
+            "title": "Message",
+            "description": "Status description"
+          }
+        },
+        "type": "object",
+        "required": [
+          "cancelled_payments_count",
+          "released_accounts_count",
+          "message"
+        ],
+        "title": "ReleaseAccountsResponse",
+        "description": "Result of releasing all locked accounts."
+      },
+      "ScenarioRead": {
+        "properties": {
+          "scenario_id": {
+            "type": "string",
+            "title": "Scenario Id",
+            "description": "Unique scenario identifier"
+          },
+          "name": {
+            "type": "string",
+            "title": "Name",
+            "description": "Human-readable scenario title"
+          },
+          "description": {
+            "type": "string",
+            "title": "Description",
+            "description": "Scenario description"
+          }
+        },
+        "type": "object",
+        "required": [
+          "scenario_id",
+          "name",
+          "description"
+        ],
+        "title": "ScenarioRead",
+        "description": "Schema describing an available payment scenario."
+      },
+      "TelegramAccountCheckResponse": {
+        "properties": {
+          "account_id": {
+            "type": "string",
+            "format": "uuid",
+            "title": "Account Id",
+            "description": "Account identifier"
+          },
+          "status": {
+            "$ref": "#/components/schemas/AccountStatus",
+            "description": "Evaluated status"
+          },
+          "is_authorized": {
+            "type": "boolean",
+            "title": "Is Authorized",
+            "description": "Whether session is valid and authorized"
+          },
+          "telegram_user_id": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Telegram User Id",
+            "description": "Telegram user ID"
+          },
+          "first_name": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "First Name",
+            "description": "First name"
+          },
+          "last_name": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Last Name",
+            "description": "Last name"
+          },
+          "username": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Username",
+            "description": "Telegram username"
+          },
+          "phone": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Phone",
+            "description": "Phone number"
+          },
+          "is_premium": {
+            "anyOf": [
+              {
+                "type": "boolean"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Is Premium",
+            "description": "Telegram Premium flag"
+          },
+          "flood_wait_seconds": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Flood Wait Seconds",
+            "description": "Seconds to wait if flood wait"
+          },
+          "error": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Error",
+            "description": "Error explanation if any"
+          },
+          "checked_at": {
+            "type": "string",
+            "format": "date-time",
+            "title": "Checked At",
+            "description": "Check timestamp"
+          }
+        },
+        "type": "object",
+        "required": [
+          "account_id",
+          "status",
+          "is_authorized",
+          "checked_at"
+        ],
+        "title": "TelegramAccountCheckResponse",
+        "description": "Response returned when an account status check is executed."
+      },
+      "TelegramAccountCreate": {
+        "properties": {
+          "title": {
+            "type": "string",
+            "maxLength": 128,
+            "minLength": 1,
+            "title": "Title",
+            "description": "Friendly identifier or label",
+            "examples": [
+              "Payment Worker #1"
+            ]
+          },
+          "phone": {
+            "anyOf": [
+              {
+                "type": "string",
+                "maxLength": 32
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Phone",
+            "description": "Associated international phone number",
+            "examples": [
+              "+79991234567"
+            ]
+          },
+          "proxy_url": {
+            "anyOf": [
+              {
+                "type": "string",
+                "maxLength": 512
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Proxy Url",
+            "description": "Proxy URL (e.g. socks5://user:pass@host:port)",
+            "examples": [
+              "socks5://user:pass@192.168.1.100:1080"
+            ]
+          },
+          "device_model": {
+            "anyOf": [
+              {
+                "type": "string",
+                "maxLength": 128
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Device Model",
+            "description": "Device model name (auto-generated if omitted)",
+            "examples": [
+              "Samsung Galaxy S24 Ultra"
+            ]
+          },
+          "system_version": {
+            "anyOf": [
+              {
+                "type": "string",
+                "maxLength": 64
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "System Version",
+            "description": "OS / API version (auto-generated if omitted)",
+            "examples": [
+              "Android 14 (SDK 34)"
+            ]
+          },
+          "app_version": {
+            "anyOf": [
+              {
+                "type": "string",
+                "maxLength": 64
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "App Version",
+            "description": "Telegram app version (auto-generated if omitted)",
+            "examples": [
+              "10.14.5"
+            ]
+          },
+          "system_lang_code": {
+            "anyOf": [
+              {
+                "type": "string",
+                "maxLength": 16
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "System Lang Code",
+            "description": "System language code (defaults based on lang_code)",
+            "examples": [
+              "ru-RU"
+            ]
+          },
+          "lang_code": {
+            "type": "string",
+            "maxLength": 16,
+            "title": "Lang Code",
+            "description": "Client language code",
+            "default": "ru",
+            "examples": [
+              "ru"
+            ]
+          },
+          "api_id": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Api Id",
+            "description": "Telegram API ID override",
+            "examples": [
+              2040
+            ]
+          },
+          "api_hash": {
+            "anyOf": [
+              {
+                "type": "string",
+                "maxLength": 64
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Api Hash",
+            "description": "Telegram API Hash override",
+            "examples": [
+              "b18441a1ff607e10a989891a5462e627"
+            ]
+          },
+          "session_string": {
+            "type": "string",
+            "minLength": 10,
+            "title": "Session String",
+            "description": "Telethon StringSession auth key string",
+            "examples": [
+              "1ApWapzMBu7..."
+            ]
+          },
+          "verify_on_create": {
+            "type": "boolean",
+            "title": "Verify On Create",
+            "description": "Whether to immediately test MTProto connection to Telegram",
+            "default": false,
+            "examples": [
+              true
+            ]
+          }
+        },
+        "type": "object",
+        "required": [
+          "title",
+          "session_string"
+        ],
+        "title": "TelegramAccountCreate",
+        "description": "Schema for adding a new Telegram account session."
+      },
+      "TelegramAccountRead": {
+        "properties": {
+          "id": {
+            "type": "string",
+            "format": "uuid",
+            "title": "Id",
+            "description": "Account unique identifier (UUIDv7)"
+          },
+          "title": {
+            "type": "string",
+            "title": "Title",
+            "description": "Account label"
+          },
+          "phone": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Phone",
+            "description": "Phone number"
+          },
+          "proxy_url": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Proxy Url",
+            "description": "Configured proxy URL"
+          },
+          "device_model": {
+            "type": "string",
+            "title": "Device Model",
+            "description": "Device model"
+          },
+          "system_version": {
+            "type": "string",
+            "title": "System Version",
+            "description": "OS version"
+          },
+          "app_version": {
+            "type": "string",
+            "title": "App Version",
+            "description": "App version"
+          },
+          "system_lang_code": {
+            "type": "string",
+            "title": "System Lang Code",
+            "description": "System locale"
+          },
+          "lang_code": {
+            "type": "string",
+            "title": "Lang Code",
+            "description": "Language code"
+          },
+          "api_id": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Api Id",
+            "description": "Telegram API ID"
+          },
+          "status": {
+            "$ref": "#/components/schemas/AccountStatus",
+            "description": "Current status"
+          },
+          "telegram_user_id": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Telegram User Id",
+            "description": "Telegram User ID"
+          },
+          "first_name": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "First Name",
+            "description": "First name"
+          },
+          "last_name": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Last Name",
+            "description": "Last name"
+          },
+          "username": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Username",
+            "description": "Username"
+          },
+          "is_premium": {
+            "anyOf": [
+              {
+                "type": "boolean"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Is Premium",
+            "description": "Premium status"
+          },
+          "flood_wait_until": {
+            "anyOf": [
+              {
+                "type": "string",
+                "format": "date-time"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Flood Wait Until",
+            "description": "FloodWait expiry"
+          },
+          "last_checked_at": {
+            "anyOf": [
+              {
+                "type": "string",
+                "format": "date-time"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Last Checked At",
+            "description": "Last check timestamp"
+          },
+          "last_error": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Last Error",
+            "description": "Last error description"
+          },
+          "created_at": {
+            "type": "string",
+            "format": "date-time",
+            "title": "Created At",
+            "description": "Creation timestamp"
+          },
+          "updated_at": {
+            "type": "string",
+            "format": "date-time",
+            "title": "Updated At",
+            "description": "Last update timestamp"
+          }
+        },
+        "type": "object",
+        "required": [
+          "id",
+          "title",
+          "phone",
+          "proxy_url",
+          "device_model",
+          "system_version",
+          "app_version",
+          "system_lang_code",
+          "lang_code",
+          "api_id",
+          "status",
+          "telegram_user_id",
+          "first_name",
+          "last_name",
+          "username",
+          "is_premium",
+          "flood_wait_until",
+          "last_checked_at",
+          "last_error",
+          "created_at",
+          "updated_at"
+        ],
+        "title": "TelegramAccountRead",
+        "description": "Safe schema for returning Telegram account details in responses."
+      },
+      "TelegramAccountUpdate": {
+        "properties": {
+          "title": {
+            "anyOf": [
+              {
+                "type": "string",
+                "maxLength": 128,
+                "minLength": 1
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Title",
+            "description": "Updated label"
+          },
+          "phone": {
+            "anyOf": [
+              {
+                "type": "string",
+                "maxLength": 32
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Phone",
+            "description": "Updated phone number"
+          },
+          "proxy_url": {
+            "anyOf": [
+              {
+                "type": "string",
+                "maxLength": 512
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Proxy Url",
+            "description": "Updated proxy URL"
+          },
+          "device_model": {
+            "anyOf": [
+              {
+                "type": "string",
+                "maxLength": 128
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Device Model",
+            "description": "Updated device model"
+          },
+          "system_version": {
+            "anyOf": [
+              {
+                "type": "string",
+                "maxLength": 64
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "System Version",
+            "description": "Updated OS version"
+          },
+          "app_version": {
+            "anyOf": [
+              {
+                "type": "string",
+                "maxLength": 64
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "App Version",
+            "description": "Updated client version"
+          },
+          "system_lang_code": {
+            "anyOf": [
+              {
+                "type": "string",
+                "maxLength": 16
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "System Lang Code",
+            "description": "Updated system locale"
+          },
+          "lang_code": {
+            "anyOf": [
+              {
+                "type": "string",
+                "maxLength": 16
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Lang Code",
+            "description": "Updated client language"
+          },
+          "api_id": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Api Id",
+            "description": "Updated API ID"
+          },
+          "api_hash": {
+            "anyOf": [
+              {
+                "type": "string",
+                "maxLength": 64
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Api Hash",
+            "description": "Updated API Hash"
+          },
+          "status": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/AccountStatus"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "description": "Manually override status (e.g. disabled or active)"
+          },
+          "session_string": {
+            "anyOf": [
+              {
+                "type": "string",
+                "minLength": 10
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Session String",
+            "description": "Replace StringSession string"
+          }
+        },
+        "type": "object",
+        "title": "TelegramAccountUpdate",
+        "description": "Schema for updating an existing Telegram account (partial updates)."
       },
       "ValidationError": {
         "properties": {

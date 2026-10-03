@@ -259,6 +259,29 @@ async def on_check_all_accounts(
         )
 
 
+async def on_release_all_accounts(
+    callback: CallbackQuery,
+    _button: Button,
+    dialog_manager: DialogManager,
+) -> None:
+    """Cancel all active pending payments and release all reserved accounts."""
+    api_client: ApiClient = dialog_manager.middleware_data["api_client"]
+    try:
+        res = await api_client.release_all_accounts()
+        dialog_manager.dialog_data["last_action_msg"] = (
+            f"🔓 <b>Все аккаунты освобождены:</b> {res.message}"
+        )
+        await callback.answer(
+            f"Освобождено: {res.released_accounts_count} аккаунтов",
+            show_alert=False,
+        )
+    except Exception as exc:
+        dialog_manager.dialog_data["last_action_msg"] = (
+            f"❌ Ошибка освобождения аккаунтов: {exc}"
+        )
+        await callback.answer(safe_alert_text(f"Ошибка: {exc}"), show_alert=True)
+
+
 async def on_delete_account(
     callback: CallbackQuery,
     _button: Button,
@@ -591,6 +614,14 @@ accounts_list_window = Window(
             on_click=on_check_all_accounts,
             when="has_accounts",
         ),
+        Button(
+            Const("🔓 Освободить все"),
+            id="btn_release_all_accounts",
+            on_click=on_release_all_accounts,
+            when="has_accounts",
+        ),
+    ),
+    Row(
         SwitchTo(
             Const("➕ Добавить сессию"),
             id="to_choose_method",

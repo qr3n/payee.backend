@@ -15,6 +15,7 @@ from bot.client.schemas import (
     PhoneCodeResponse,
     PhoneSignInResponse,
     ReadinessResponse,
+    ReleaseAccountsResponse,
     ScenarioRead,
     TelegramAccountCheckResponse,
     TelegramAccountCreate,
@@ -294,3 +295,10 @@ class ApiClient:
         response = await client.post(f"/api/v1/payments/{payment_id}/cancel")
         response.raise_for_status()
         return PaymentRead.model_validate(response.json())
+
+    async def release_all_accounts(self) -> ReleaseAccountsResponse:
+        """Cancel all active pending payments and release all locked accounts."""
+        client = await self.get_client()
+        response = await client.post("/api/v1/payments/release-all-accounts")
+        response.raise_for_status()
+        return ReleaseAccountsResponse.model_validate(response.json())

@@ -125,3 +125,15 @@ class PaymentRaceEvent(BaseModel):
     stage_timings: list[dict[str, Any]] = Field(
         default_factory=list, description="Per-stage timing breakdown"
     )
+
+
+class ReleaseAccountsResponse(BaseModel):
+    """Result of releasing all locked accounts."""
+
+    cancelled_payments_count: int = Field(
+        description="Number of active pending payments cancelled"
+    )
+    released_accounts_count: int = Field(
+        description="Number of distinct Telegram accounts unlocked"
+    )
+    message: str = Field(description="Status description")

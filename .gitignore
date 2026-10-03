@@ -63,3 +63,9 @@ htmlcov/
 # OS specific
 .DS_Store
 Thumbs.db
+
+# Telegram Session files
+*.session
+*.session-journal
+*.session-wal
+*.session-shm

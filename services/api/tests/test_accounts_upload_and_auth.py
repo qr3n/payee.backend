@@ -43,14 +43,32 @@ def test_parse_json_proxy() -> None:
     )
 
 
+def create_synthetic_sqlite_session_bytes() -> bytes:
+    """Generate a synthetic SQLite session with a random AuthKey for testing."""
+    import os
+    import tempfile
+    from pathlib import Path
+
+    from telethon.crypto import AuthKey
+    from telethon.sessions import SQLiteSession
+
+    with tempfile.TemporaryDirectory() as tmp_dir:
+        base = os.path.join(tmp_dir, "test")
+        session = SQLiteSession(base)
+        session.set_dc(2, "149.154.167.50", 443)
+        session.auth_key = AuthKey(data=os.urandom(256))
+        session.save()
+        session.close()
+        return Path(f"{base}.session").read_bytes()
+
+
 def test_parse_client_json_and_sqlite_session() -> None:
     json_path = EXAMPLES_DIR / "263161426.json"
-    session_path = EXAMPLES_DIR / "263161426_telethon.session"
+    session_bytes = create_synthetic_sqlite_session_bytes()
 
     with open(json_path, "rb") as f:
         meta = parse_client_json(f.read())
-    with open(session_path, "rb") as f:
-        session_str = convert_sqlite_session_bytes_to_string(f.read())
+    session_str = convert_sqlite_session_bytes_to_string(session_bytes)
 
     assert meta["api_id"] == 2496
     assert meta["api_hash"] == "8da85b0d5bfe62527e5b244c209159c3"
@@ -63,12 +81,10 @@ def test_parse_client_json_and_sqlite_session() -> None:
 @pytest.mark.asyncio
 async def test_upload_account_api(client: AsyncClient) -> None:
     json_path = EXAMPLES_DIR / "263161426.json"
-    session_path = EXAMPLES_DIR / "263161426_telethon.session"
+    session_bytes = create_synthetic_sqlite_session_bytes()
 
     with open(json_path, "rb") as f:
         json_bytes = f.read()
-    with open(session_path, "rb") as f:
-        session_bytes = f.read()
 
     files = {
         "session_file": (

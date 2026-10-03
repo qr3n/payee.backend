@@ -24,6 +24,8 @@ dependencies = [
     "python-socks[asyncio]>=2.6.0",
     "cryptg>=0.4.0",
     "python-multipart>=0.0.18",
+    "beautifulsoup4>=4.15.0",
+    "httpx>=0.28.1",
 ]
 
 [dependency-groups]

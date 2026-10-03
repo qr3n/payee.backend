@@ -328,9 +328,23 @@ async def test_prepare_account_scenarios_service(db_session: AsyncSession) -> No
     acc = await _create_test_account(db_session, "Prep Acc")
 
     mock_client = AsyncMock()
-    with patch(
-        "app.modules.accounts.session_pool.telegram_session_pool.get_connected_client",
-        new=AsyncMock(return_value=mock_client),
+    with (
+        patch(
+            "app.modules.accounts.session_pool.telegram_session_pool.get_connected_client",
+            new=AsyncMock(return_value=mock_client),
+        ),
+        patch(
+            "app.modules.payments.scenarios.starslly_scenario.StarsllyBotScenario.prepare",
+            new=AsyncMock(),
+        ),
+        patch(
+            "app.modules.payments.scenarios.starshoppik_scenario.StarShoppikBotScenario.prepare",
+            new=AsyncMock(),
+        ),
+        patch(
+            "app.modules.payments.scenarios.helperstars_scenario.HelperStarsBotScenario.prepare",
+            new=AsyncMock(),
+        ),
     ):
         result = await prepare_account_scenarios(db_session, acc.id)
         assert result["status"] == "completed"
@@ -375,6 +389,18 @@ async def test_refresh_idle_account_scenarios_service(
         patch(
             "app.modules.payments.scenarios.state.is_scenario_prepared",
             new=AsyncMock(return_value=False),
+        ),
+        patch(
+            "app.modules.payments.scenarios.starslly_scenario.StarsllyBotScenario.prepare",
+            new=AsyncMock(),
+        ),
+        patch(
+            "app.modules.payments.scenarios.starshoppik_scenario.StarShoppikBotScenario.prepare",
+            new=AsyncMock(),
+        ),
+        patch(
+            "app.modules.payments.scenarios.helperstars_scenario.HelperStarsBotScenario.prepare",
+            new=AsyncMock(),
         ),
     ):
         result = await refresh_idle_account_scenarios(db_session)

@@ -17,6 +17,7 @@ from app.core.logging import get_logger
 from app.modules.accounts.models import AccountStatus, TelegramAccount
 from app.modules.payments.exceptions import NoAccountsAvailableException
 from app.modules.payments.models import Payment, PaymentStatus
+from app.modules.payments.resolvers import resolve_sbp_link
 from app.modules.payments.scenarios import (
     ScenarioContext,
     scenario_registry,
@@ -133,6 +134,12 @@ async def create_payment(
         meta=payment_in.meta,
     )
     result = await scenario.create_payment(ctx)
+
+    # 3. Attempt extraction of direct SBP (NSPK) link if supported gateway link
+    t_resolve_start = time.perf_counter()
+    resolved_link, is_resolved = await resolve_sbp_link(result.payment_link)
+    resolve_duration = round(time.perf_counter() - t_resolve_start, 2)
+
     total_duration_sec = round(time.perf_counter() - t_start, 2)
 
     scenario_stages = list(result.meta.get("stage_timings", []))
@@ -145,14 +152,36 @@ async def create_payment(
         *scenario_stages,
     ]
 
+    if is_resolved:
+        all_stages.append(
+            {
+                "stage": "resolve_sbp_link",
+                "description": "Извлечение прямой ссылки СБП (НСПК)",
+                "duration_sec": resolve_duration,
+            }
+        )
+    elif "gate.antilopay.com" in (result.payment_link or "") or "cardlink.link" in (
+        result.payment_link or ""
+    ):
+        all_stages.append(
+            {
+                "stage": "resolve_sbp_link",
+                "description": "Попытка извлечения ссылки СБП (оставлен оригинал)",
+                "duration_sec": resolve_duration,
+            }
+        )
+
     merged_meta = {
         **payment_in.meta,
         **result.meta,
+        "original_payment_link": result.payment_link,
+        "resolved_sbp_link": resolved_link if is_resolved else None,
+        "is_sbp_resolved": is_resolved,
         "generation_time_sec": total_duration_sec,
         "stage_timings": all_stages,
     }
 
-    # 3. Create new payment record
+    # 4. Create new payment record
     payment = Payment(
         client_user_id=payment_in.client_user_id,
         scenario_id=scenario.scenario_id,
@@ -160,7 +189,7 @@ async def create_payment(
         currency=payment_in.currency,
         account_id=account.id,
         status=PaymentStatus.PENDING,
-        payment_link=result.payment_link,
+        payment_link=resolved_link,
         expires_at=expires_at,
         meta=merged_meta,
     )

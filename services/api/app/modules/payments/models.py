@@ -8,7 +8,16 @@ from enum import StrEnum
 from typing import Any
 from uuid import UUID
 
-from sqlalchemy import JSON, Column, ForeignKey, Numeric, String, Text
+from sqlalchemy import (
+    JSON,
+    BigInteger,
+    Column,
+    ForeignKey,
+    Numeric,
+    String,
+    Text,
+    UniqueConstraint,
+)
 from sqlmodel import Field, SQLModel
 
 from app.shared.models import BaseUUIDModel
@@ -52,6 +61,12 @@ class PaymentBase(SQLModel):
         max_length=16,
         description="Currency code (e.g. RUB, USDT, USD, XTR)",
         schema_extra={"examples": ["RUB"]},
+    )
+    idempotency_key: str | None = Field(
+        default=None,
+        sa_column=Column(String(128), nullable=True, index=True),
+        description="Optional client idempotency key to prevent duplicate charges",
+        schema_extra={"examples": ["idem_abc123"]},
     )
 
 
@@ -106,4 +121,61 @@ class Payment(PaymentBase, BaseUUIDModel, table=True):
         default_factory=dict,
         sa_column=Column(JSON, nullable=False, server_default="{}"),
         description="Scenario-specific execution parameters and responses",
+    )
+
+
+class NotificationEvent(BaseUUIDModel, table=True):
+    """
+    Database entity representing processed bot notification events
+    for idempotency and audit.
+    """
+
+    __tablename__ = "notification_events"
+    __table_args__ = (
+        UniqueConstraint(
+            "account_id",
+            "bot_username",
+            "message_id",
+            name="uq_notification_event_account_bot_msg",
+        ),
+    )
+
+    account_id: UUID = Field(
+        index=True,
+        nullable=False,
+        description="Telegram account that received the message",
+    )
+    bot_username: str = Field(
+        max_length=128,
+        index=True,
+        nullable=False,
+        description="Sender bot username",
+    )
+    message_id: int = Field(
+        sa_column=Column(BigInteger, nullable=False, index=True),
+        description="Telegram message ID",
+    )
+    message_date: datetime | None = Field(
+        default=None,
+        nullable=True,
+        description="Telegram message timestamp",
+    )
+    status: str = Field(
+        default="processed",
+        sa_column=Column(String(32), nullable=False, default="processed"),
+        description="Status of notification (processed, ignored, unmatched)",
+    )
+    payment_id: UUID | None = Field(
+        default=None,
+        sa_column=Column(
+            ForeignKey("payments.id", ondelete="SET NULL"),
+            index=True,
+            nullable=True,
+        ),
+        description="Associated payment ID",
+    )
+    raw_text: str = Field(
+        default="",
+        sa_column=Column(Text, nullable=False),
+        description="Raw text of the notification",
     )

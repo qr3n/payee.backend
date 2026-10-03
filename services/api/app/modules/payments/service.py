@@ -17,7 +17,9 @@ from sqlmodel import col, func, select
 from sqlmodel.ext.asyncio.session import AsyncSession
 
 from app.core.logging import get_logger
+from app.core.redis import get_redis_client
 from app.modules.accounts.models import AccountStatus, TelegramAccount
+from app.modules.payments import race_buffer
 from app.modules.payments.exceptions import NoAccountsAvailableException
 from app.modules.payments.models import Payment, PaymentStatus
 from app.modules.payments.resolvers import resolve_sbp_link
@@ -39,12 +41,16 @@ from app.modules.payments.schemas import (
     PaymentCallback,
     PaymentCreate,
     PaymentRaceCreate,
+    PaymentRaceFireResponse,
 )
 from app.shared.pagination import PageParams
 
 logger = get_logger(__name__)
 
 PAYMENT_TTL_MINUTES = 30
+
+# Prevent garbage-collection of fire-and-forget background race tasks
+_active_race_tasks: set[asyncio.Task[None]] = set()
 
 
 async def get_active_payment_for_user(
@@ -779,55 +785,44 @@ async def _run_race_scenario_task(
     return f"event: payment\ndata: {json.dumps(event_payload, ensure_ascii=False)}\n\n"
 
 
-async def create_payment_race_generator(
+async def start_payment_race(
+    session: AsyncSession,
     race_in: PaymentRaceCreate,
-) -> AsyncGenerator[str, None]:
+) -> PaymentRaceFireResponse:
     """
-    Async generator for SSE payment race.
+    Fire-and-forget race initiation.
 
-    Acquires up to N free accounts (one per registered scenario) locked via Redis
-    strictly during invoice generation. Runs all scenarios concurrently. Yields each
-    successful result as it arrives. Cancels remaining tasks after timeout.
-
-    SSE event types:
-      - 'started'  — emitted immediately with batch_id and scenario count
-      - 'payment'  — emitted for each successful scenario result
-      - 'error'    — emitted for each failed scenario
-      - 'done'     — emitted when all tasks have resolved or timed out
+    Acquires free Telegram accounts, initializes a Redis event buffer,
+    and launches scenario generation in a background ``asyncio.Task``.
+    Returns immediately with batch metadata so the caller can redirect
+    the user to the SSE subscription endpoint.
     """
-    from app.core.db import async_session_maker
-
     race_start = time.perf_counter()
     now = datetime.now(UTC)
     expires_at = now + timedelta(minutes=PAYMENT_TTL_MINUTES)
     batch_id: UUID = uuid6.uuid7()
+
+    # Resolve scenarios
     if race_in.scenario_ids:
-        scenarios = [scenario_registry.get(s) for s in race_in.scenario_ids]
+        scenarios = [
+            s
+            for s in (scenario_registry.get(sid) for sid in race_in.scenario_ids)
+            if s is not None
+        ]
     else:
         scenarios = scenario_registry.list_primary()
-    num_scenarios = len(scenarios)
 
-    # Acquire free accounts (one per scenario, up to num_scenarios)
-    async with async_session_maker() as setup_session:
-        free_accounts = await acquire_N_free_accounts(setup_session, n=num_scenarios)
+    num_scenarios = len(scenarios)
+    if num_scenarios == 0:
+        raise NoAccountsAvailableException("No valid scenarios to race")
+
+    # Acquire free accounts (one per scenario)
+    free_accounts = await acquire_N_free_accounts(session, n=num_scenarios)
 
     if not free_accounts:
-        err_data = json.dumps(
-            {
-                "error": "no_accounts_available",
-                "message": "Нет свободных аккаунтов",
-            },
-            ensure_ascii=False,
-        )
-        yield f"event: error\ndata: {err_data}\n\n"
-        done_data = json.dumps(
-            {"total": 0, "succeeded": 0, "failed": 0},
-            ensure_ascii=False,
-        )
-        yield f"event: done\ndata: {done_data}\n\n"
-        return
+        raise NoAccountsAvailableException()
 
-    # Prioritize accounts with free slots for exclusive scenarios
+    # Pair accounts with scenarios (exclusive slots first)
     pairs: list[tuple[TelegramAccount, str]] = []
     remaining_accounts = list(free_accounts)
 
@@ -853,18 +848,55 @@ async def create_payment_race_generator(
             acc = remaining_accounts.pop(0)
             pairs.append((acc, s.scenario_id))
 
-    # If we acquired more accounts than scenarios, release extra locks immediately
-    if remaining_accounts:
-        for unused_acc in remaining_accounts:
-            await release_account_generation_lock(unused_acc.id)
+    # Release locks on unused accounts
+    for unused_acc in remaining_accounts:
+        await release_account_generation_lock(unused_acc.id)
 
-    started_data = json.dumps(
-        {"batch_id": str(batch_id), "scenarios": [s for _, s in pairs]},
-        ensure_ascii=False,
+    scenario_ids = [sid for _, sid in pairs]
+
+    # Initialize Redis event buffer (pushes "started" event)
+    await race_buffer.init_race_buffer(batch_id, scenario_ids)
+
+    # Launch background runner (fire-and-forget)
+    task = asyncio.create_task(
+        _race_background_runner(
+            pairs=pairs,
+            batch_id=batch_id,
+            race_in=race_in,
+            expires_at=expires_at,
+            race_start=race_start,
+        )
     )
-    yield f"event: started\ndata: {started_data}\n\n"
+    _active_race_tasks.add(task)
+    task.add_done_callback(_active_race_tasks.discard)
 
-    # Launch all scenario tasks concurrently
+    logger.info(
+        "payment_race_fired",
+        batch_id=str(batch_id),
+        scenarios=scenario_ids,
+        accounts=[str(a.id) for a, _ in pairs],
+    )
+
+    return PaymentRaceFireResponse(
+        batch_id=batch_id,
+        status="running",
+        scenarios=scenario_ids,
+    )
+
+
+async def _race_background_runner(
+    pairs: list[tuple[TelegramAccount, str]],
+    batch_id: UUID,
+    race_in: PaymentRaceCreate,
+    expires_at: datetime,
+    race_start: float,
+) -> None:
+    """
+    Background coroutine: runs all race scenario tasks concurrently and
+    writes each result to the Redis event buffer as it arrives.
+
+    Handles timeouts, errors, and ensures all generation locks are released.
+    """
     tasks = [
         asyncio.create_task(
             _run_race_scenario_task(
@@ -881,13 +913,14 @@ async def create_payment_race_generator(
 
     succeeded = 0
     failed = 0
+    timed_out = False
 
     try:
         for fut in asyncio.as_completed(tasks, timeout=race_in.timeout_sec):
             try:
                 sse_event = await fut
                 succeeded += 1
-                yield sse_event
+                await race_buffer.push_race_event(batch_id, sse_event)
             except Exception as exc:
                 failed += 1
                 logger.error(
@@ -899,8 +932,10 @@ async def create_payment_race_generator(
                     {"error": "scenario_failed", "message": str(exc)},
                     ensure_ascii=False,
                 )
-                yield f"event: error\ndata: {err_payload}\n\n"
+                err_event = f"event: error\ndata: {err_payload}\n\n"
+                await race_buffer.push_race_event(batch_id, err_event)
     except TimeoutError:
+        timed_out = True
         logger.warning(
             "race_timed_out",
             batch_id=str(batch_id),
@@ -909,7 +944,7 @@ async def create_payment_race_generator(
         )
         for task in tasks:
             task.cancel()
-        # Ensure any cancelled tasks also release their generation locks
+        # Ensure cancelled tasks release their generation locks
         for account, _ in pairs:
             await release_account_generation_lock(account.id)
 
@@ -920,17 +955,114 @@ async def create_payment_race_generator(
             },
             ensure_ascii=False,
         )
-        yield f"event: error\ndata: {timeout_payload}\n\n"
+        timeout_event = f"event: error\ndata: {timeout_payload}\n\n"
+        await race_buffer.push_race_event(batch_id, timeout_event)
+    except Exception as exc:
+        # Unexpected error in the runner itself — release all locks
+        logger.error(
+            "race_background_runner_error",
+            batch_id=str(batch_id),
+            error=str(exc),
+        )
+        for account, _ in pairs:
+            await release_account_generation_lock(account.id)
 
     total_duration = round(time.perf_counter() - race_start, 2)
-    done_payload = json.dumps(
-        {
-            "batch_id": str(batch_id),
-            "total": len(pairs),
-            "succeeded": succeeded,
-            "failed": failed,
-            "duration_sec": total_duration,
-        },
-        ensure_ascii=False,
+    await race_buffer.finish_race(
+        batch_id,
+        status="timeout" if timed_out else "done",
+        total=len(pairs),
+        succeeded=succeeded,
+        failed=failed,
+        duration_sec=total_duration,
     )
-    yield f"event: done\ndata: {done_payload}\n\n"
+
+
+async def race_stream_generator(
+    batch_id: UUID,
+) -> AsyncGenerator[str, None]:
+    """
+    SSE generator with replay from Redis event buffer.
+
+    1. Subscribes to the batch Pub/Sub channel **first** (to avoid gaps)
+    2. Replays all already-buffered events (instant delivery)
+    3. If the race is still running, streams new events in real-time
+    4. Closes when the race finishes or the absolute SSE timeout is reached
+
+    This allows the client to connect at any point — before, during, or
+    after generation — and always receive the full event sequence.
+    """
+    redis = get_redis_client()
+    channel = race_buffer.get_channel_name(batch_id)
+
+    # Check if batch exists
+    status = await race_buffer.get_race_status(batch_id)
+    if status is None:
+        err = json.dumps(
+            {
+                "error": "batch_not_found",
+                "message": f"Race batch {batch_id} not found or expired",
+            },
+            ensure_ascii=False,
+        )
+        yield f"event: error\ndata: {err}\n\n"
+        return
+
+    # Subscribe FIRST so we never miss events between replay and listen
+    pubsub = redis.pubsub()
+    await pubsub.subscribe(channel)
+
+    try:
+        # Replay: yield all existing events from buffer
+        existing = await race_buffer.get_buffered_events(batch_id, start=0)
+        cursor = len(existing)
+        for event in existing:
+            yield event
+
+        # If already finished, the "done" event is in the buffer — we're done
+        status = await race_buffer.get_race_status(batch_id)
+        if status != "running":
+            return
+
+        # Live: poll Pub/Sub with periodic status fallback checks
+        max_wait = 300.0  # 5 minutes absolute SSE timeout
+        start_time = time.monotonic()
+
+        while (time.monotonic() - start_time) < max_wait:
+            message = await pubsub.get_message(
+                ignore_subscribe_messages=True, timeout=5.0
+            )
+
+            if message is not None:
+                # New events available — read from buffer at our cursor
+                new_events = await race_buffer.get_buffered_events(
+                    batch_id, start=cursor
+                )
+                cursor += len(new_events)
+                for event in new_events:
+                    yield event
+
+                # Exit when race is done
+                if message.get("data") == "done":
+                    return
+            else:
+                # Periodic fallback: race may have finished without us
+                # receiving the Pub/Sub notification
+                status = await race_buffer.get_race_status(batch_id)
+                if status != "running":
+                    new_events = await race_buffer.get_buffered_events(
+                        batch_id, start=cursor
+                    )
+                    for event in new_events:
+                        yield event
+                    return
+
+        # Absolute SSE timeout reached
+        timeout_err = json.dumps(
+            {"error": "sse_timeout", "message": "SSE stream timeout reached"},
+            ensure_ascii=False,
+        )
+        yield f"event: error\ndata: {timeout_err}\n\n"
+    finally:
+        await pubsub.unsubscribe(channel)
+        await pubsub.aclose()  # type: ignore[no-untyped-call]

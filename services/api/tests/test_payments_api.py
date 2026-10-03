@@ -175,10 +175,10 @@ async def test_get_payment_not_found(client: AsyncClient) -> None:
 
 
 @pytest.mark.asyncio
-async def test_create_payment_race_api_sse(
+async def test_create_payment_race_api_fire_and_stream(
     client: AsyncClient, db_session: AsyncSession
 ) -> None:
-    """Test POST /api/v1/payments/race streams SSE events."""
+    """Test POST /api/v1/payments/race returns JSON, then GET stream yields SSE."""
     await _create_test_account(db_session, "Race Account 1")
 
     payload = {
@@ -188,11 +188,27 @@ async def test_create_payment_race_api_sse(
         "timeout_sec": 10.0,
     }
 
-    response = await client.post("/api/v1/payments/race", json=payload)
-    assert response.status_code == 200
-    assert "text/event-stream" in response.headers.get("content-type", "")
+    # Step 1: Fire — should return JSON with batch_id
+    fire_response = await client.post("/api/v1/payments/race", json=payload)
+    assert fire_response.status_code == 200
+    fire_data = fire_response.json()
+    assert "batch_id" in fire_data
+    assert fire_data["status"] == "running"
+    assert isinstance(fire_data["scenarios"], list)
 
-    events = response.text.strip().split("\n\n")
+    batch_id = fire_data["batch_id"]
+
+    # Allow background runner a moment to complete
+    import asyncio
+
+    await asyncio.sleep(2)
+
+    # Step 2: Subscribe — should return SSE with replay
+    stream_response = await client.get(f"/api/v1/payments/race/{batch_id}/stream")
+    assert stream_response.status_code == 200
+    assert "text/event-stream" in stream_response.headers.get("content-type", "")
+
+    events = stream_response.text.strip().split("\n\n")
     event_types = []
     for ev in events:
         lines = ev.split("\n")

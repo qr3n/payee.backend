@@ -17,6 +17,7 @@ from app.modules.payments.schemas import (
     PaymentCallback,
     PaymentCreate,
     PaymentRaceCreate,
+    PaymentRaceFireResponse,
     PaymentRead,
     ReleaseAccountsResponse,
     ScenarioRead,
@@ -48,30 +49,44 @@ async def create_payment(
 
 @router.post(
     "/race",
-    summary="Race all scenarios (SSE)",
+    response_model=PaymentRaceFireResponse,
+    summary="Start payment race (fire-and-forget)",
     description=(
-        "Runs all registered bot scenarios concurrently against all "
-        "available accounts. Streams each successful payment link as a "
-        "Server-Sent Event (SSE) as it is generated.\n\n"
+        "Starts all registered bot scenarios concurrently against available "
+        "accounts. Returns immediately with a batch_id while generation "
+        "runs in the background.\n\n"
+        "Use GET /payments/race/{batch_id}/stream to subscribe to results "
+        "via Server-Sent Events with full replay capability."
+    ),
+)
+async def create_payment_race(
+    race_in: PaymentRaceCreate,
+    db: AsyncSession = Depends(get_db),
+) -> PaymentRaceFireResponse:
+    """Fire-and-forget concurrent multi-scenario payment race."""
+    return await payment_service.start_payment_race(session=db, race_in=race_in)
+
+
+@router.get(
+    "/race/{batch_id}/stream",
+    summary="Subscribe to race results (SSE with replay)",
+    description=(
+        "Server-Sent Events stream with full replay capability. "
+        "Returns all already-generated results immediately, then streams "
+        "remaining results as they complete.\n\n"
         "SSE event types:\n"
-        "- started: accounts locked\n"
-        "- payment: link generated\n"
+        "- started: race initiated with scenarios list\n"
+        "- payment: payment link generated\n"
         "- error: scenario failed\n"
         "- done: race completed\n"
     ),
     response_class=StreamingResponse,
     responses={200: {"content": {"text/event-stream": {}}}},
 )
-async def create_payment_race(
-    race_in: PaymentRaceCreate,
-) -> StreamingResponse:
-    """
-    Concurrent multi-scenario payment race endpoint (SSE).
-    Does not use get_db — sessions are managed manually inside the generator
-    because SSE responses are incompatible with FastAPI's request lifecycle.
-    """
+async def stream_payment_race(batch_id: UUID) -> StreamingResponse:
+    """SSE stream with replay for an in-progress or completed payment race."""
     return StreamingResponse(
-        payment_service.create_payment_race_generator(race_in),
+        payment_service.race_stream_generator(batch_id),
         media_type="text/event-stream",
         headers={
             "Cache-Control": "no-cache",

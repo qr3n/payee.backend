@@ -139,6 +139,19 @@ class PaymentRaceEvent(BaseModel):
     )
 
 
+class PaymentRaceFireResponse(BaseModel):
+    """Response from fire-and-forget race initiation. Generation starts immediately."""
+
+    batch_id: UUID = Field(description="Batch ID — use for SSE subscription")
+    status: str = Field(
+        default="running",
+        description="Initial race status (always 'running' at creation time)",
+    )
+    scenarios: list[str] = Field(
+        description="List of scenario IDs being raced concurrently"
+    )
+
+
 class ReleaseAccountsResponse(BaseModel):
     """Result of releasing all locked accounts."""
 

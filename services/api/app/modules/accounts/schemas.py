@@ -162,7 +162,20 @@ class TelegramAccountUpdate(SQLModel):
         description="Replace StringSession string",
     )
 
-    @field_validator("title", "lang_code", "status", "session_string", mode="before")
+    @field_validator(
+        "title",
+        "phone",
+        "device_model",
+        "system_version",
+        "app_version",
+        "system_lang_code",
+        "lang_code",
+        "api_id",
+        "api_hash",
+        "status",
+        "session_string",
+        mode="before",
+    )
     @classmethod
     def validate_non_nullable(cls, v: Any, info: Any) -> Any:
         if v is None:

@@ -1,7 +1,7 @@
 from functools import lru_cache
 from typing import Literal
 
-from pydantic import Field, SecretStr, field_validator
+from pydantic import AliasChoices, Field, SecretStr, field_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 
@@ -74,6 +74,7 @@ class BotSettings(BaseSettings):
     )
     API_KEY: SecretStr | None = Field(
         default=None,
+        validation_alias=AliasChoices("API_KEY", "ADMIN_API_KEY"),
         description="Administrative API key for backend communication",
     )
     API_TIMEOUT: float = Field(

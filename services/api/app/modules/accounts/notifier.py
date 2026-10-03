@@ -48,7 +48,7 @@ def format_account_alert(
     if new_status == AccountStatus.BANNED:
         return (
             "⛔️ <b>Внимание: Telegram-аккаунт заблокирован!</b>\n\n"
-            f"📱 <b>Аккаунт:</b> {account.title} (<code>{phone_display}</code>)\n"
+            f"📱 <b>Аккаунт:</b> {title_display} (<code>{phone_display}</code>)\n"
             f"🆔 <b>ID в системе:</b> <code>{account.id}</code>\n"
             f"👤 <b>TG ID:</b> {tg_id_display} ({username_display})\n"
             f"⚠️ <b>Статус:</b> 🔴 <b>Заблокирован (BANNED)</b>\n"
@@ -65,7 +65,7 @@ def format_account_alert(
         )
         return (
             "⏳ <b>Внимание: Telegram-сессия получила Flood Wait!</b>\n\n"
-            f"📱 <b>Аккаунт:</b> {account.title} (<code>{phone_display}</code>)\n"
+            f"📱 <b>Аккаунт:</b> {title_display} (<code>{phone_display}</code>)\n"
             f"🆔 <b>ID в системе:</b> <code>{account.id}</code>\n"
             f"👤 <b>TG ID:</b> {tg_id_display} ({username_display})\n"
             f"⚠️ <b>Статус:</b> 🟡 <b>Flood Wait</b>\n"
@@ -78,7 +78,7 @@ def format_account_alert(
     if new_status == AccountStatus.ERROR:
         return (
             "❌ <b>Ошибка подключения к Telegram-сессии!</b>\n\n"
-            f"📱 <b>Аккаунт:</b> {account.title} (<code>{phone_display}</code>)\n"
+            f"📱 <b>Аккаунт:</b> {title_display} (<code>{phone_display}</code>)\n"
             f"🆔 <b>ID в системе:</b> <code>{account.id}</code>\n"
             f"👤 <b>TG ID:</b> {tg_id_display} ({username_display})\n"
             f"⚠️ <b>Статус:</b> ❌ <b>Ошибка (ERROR)</b>\n"
@@ -89,7 +89,7 @@ def format_account_alert(
     if new_status == AccountStatus.ACTIVE and old_status != AccountStatus.ACTIVE:
         return (
             "✅ <b>Telegram-сессия успешно восстановлена!</b>\n\n"
-            f"📱 <b>Аккаунт:</b> {account.title} (<code>{phone_display}</code>)\n"
+            f"📱 <b>Аккаунт:</b> {title_display} (<code>{phone_display}</code>)\n"
             f"🆔 <b>ID в системе:</b> <code>{account.id}</code>\n"
             f"👤 <b>TG ID:</b> {tg_id_display} ({username_display})\n"
             "🟢 <b>Статус:</b> <b>Активен (ACTIVE)</b>\n"

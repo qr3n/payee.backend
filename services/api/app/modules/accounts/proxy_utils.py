@@ -21,8 +21,9 @@ def parse_proxy_url(proxy_url: str | None) -> dict[str, Any] | None:
     parsed = urlparse(cleaned_url)
 
     if not parsed.scheme or not parsed.hostname or not parsed.port:
+        safe_url = mask_proxy_url(cleaned_url) or cleaned_url
         raise ValueError(
-            f"Invalid proxy URL '{proxy_url}'. Expected format: scheme://[user:pass@]host:port"
+            f"Invalid proxy URL '{safe_url}'. Expected format: scheme://[user:pass@]host:port"
         )
 
     scheme = parsed.scheme.lower()

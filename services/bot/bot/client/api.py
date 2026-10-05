@@ -271,14 +271,19 @@ class ApiClient:
         scenario_id: str = "starslly_bot",
         currency: str = "RUB",
         meta: dict[str, Any] | None = None,
+        idempotency_key: str | None = None,
     ) -> PaymentRead:
         """Create a payment and execute scenario to generate payment link."""
+        import uuid
+
         client = await self.get_client()
+        idem_key = idempotency_key or f"bot_{client_user_id}_{uuid.uuid4().hex}"
         payload = PaymentCreate(
             client_user_id=client_user_id,
             scenario_id=scenario_id,
             amount=amount,
             currency=currency,
+            idempotency_key=idem_key,
             meta=meta or {},
         ).model_dump(mode="json")
         response = await client.post("/api/v1/payments/", json=payload)

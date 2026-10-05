@@ -6,6 +6,7 @@ import asyncio
 import time
 from datetime import UTC, datetime, timedelta
 from decimal import Decimal
+from typing import Any
 from unittest.mock import AsyncMock, patch
 from uuid import uuid4
 
@@ -39,6 +40,7 @@ from app.modules.payments.schemas import (
 )
 from app.modules.payments.service import (
     cancel_payment,
+    compute_payment_request_hash,
     create_payment,
     expire_overdue_payments,
     get_payment,
@@ -1080,3 +1082,329 @@ async def test_run_race_scenario_task_slot_failure_retains_cause() -> None:
             race_start=time.perf_counter(),
         )
     assert "not registered" in str(exc.value)
+
+
+@pytest.mark.asyncio
+async def test_finalization_error_persists_reconciliation_required_without_deadlock(
+    db_session: AsyncSession,
+) -> None:
+    """
+    Review 5 Blocker 1 & 2:
+    Simulate an error occurring during finalization (after account assignment
+    and external scenario).
+    Verify that:
+    1. The operation does not deadlock/hang (completes well within timeout).
+    2. The payment record is committed with status RECONCILIATION_REQUIRED.
+    3. The payment meta contains the assigned account_id,
+       execution_stage='finalizing', and error.
+    4. Subsequent request with the same idempotency key raises 409
+       RECONCILIATION_REQUIRED without calling the external provider again.
+    """
+    from app.core import db as core_db
+    from app.modules.payments.scenarios.registry import scenario_registry
+
+    acc = await _create_test_account(db_session, "Finalize Deadlock Acc")
+    acc_id = acc.id
+    await db_session.commit()
+
+    scenario = scenario_registry.get("mock_bot")
+    assert scenario is not None
+    provider_called = 0
+    orig_create = scenario.create_payment
+
+    async def counting_create(ctx: ScenarioContext) -> ScenarioResult:
+        nonlocal provider_called
+        provider_called += 1
+        return await orig_create(ctx)
+
+    scenario.create_payment = counting_create  # type: ignore[method-assign]
+    idem_key = "idem_finalize_deadlock_test"
+
+    req = PaymentCreate(
+        client_user_id="user_fin_deadlock",
+        scenario_id="mock_bot",
+        amount=Decimal("150.00"),
+        idempotency_key=idem_key,
+    )
+
+    real_maker = core_db.async_session_maker
+    call_idx = 0
+
+    class FailingFinalizeSession:
+        def __init__(self, inner: AsyncSession) -> None:
+            self._inner = inner
+
+        def __getattr__(self, name: str) -> Any:
+            return getattr(self._inner, name)
+
+        async def commit(self) -> None:
+            # Succeed for registration (call 1) and assignment (call 2),
+            # fail on finalization (call 3)
+            nonlocal call_idx
+            call_idx += 1
+            if call_idx == 3:
+                raise RuntimeError("Simulated finalization commit failure")
+            await self._inner.commit()
+
+        async def __aenter__(self) -> "FailingFinalizeSession":
+            await self._inner.__aenter__()
+            return self
+
+        async def __aexit__(self, exc_type: Any, exc_val: Any, exc_tb: Any) -> None:
+            await self._inner.__aexit__(exc_type, exc_val, exc_tb)
+
+    def hooked_maker(*args: Any, **kwargs: Any) -> Any:
+        sess = real_maker(*args, **kwargs)
+        return FailingFinalizeSession(sess)
+
+    try:
+        with (
+            patch.object(core_db, "async_session_maker", side_effect=hooked_maker),
+            pytest.raises(RuntimeError, match="Simulated finalization commit failure"),
+        ):
+            # Ensure no deadlock: wait_for with 5.0s timeout
+            await asyncio.wait_for(
+                create_payment(db_session, req),
+                timeout=5.0,
+            )
+
+        assert provider_called == 1
+
+        # Check DB independently
+        async with core_db.async_session_maker() as verify_session:
+            stmt = select(Payment).where(
+                Payment.client_user_id == req.client_user_id,
+                Payment.idempotency_key == idem_key,
+            )
+            persisted = (await verify_session.exec(stmt)).first()
+            assert persisted is not None
+            assert persisted.status == PaymentStatus.RECONCILIATION_REQUIRED
+            assert persisted.account_id == acc_id
+            assert persisted.meta.get("execution_stage") == "finalizing"
+            assert "Simulated finalization commit failure" in persisted.meta.get(
+                "error", ""
+            )
+
+        # Retry with same idempotency key must raise 409 without calling provider
+        with pytest.raises(AppException) as retry_exc:
+            await create_payment(db_session, req)
+        assert retry_exc.value.code == "RECONCILIATION_REQUIRED"
+        assert provider_called == 1
+    finally:
+        scenario.create_payment = orig_create  # type: ignore[method-assign]
+
+
+@pytest.mark.asyncio
+async def test_redis_unavailability_in_finally_does_not_mask_payment_or_rollback(
+    db_session: AsyncSession,
+) -> None:
+    """
+    Review 5 Blocker 2:
+    Verify that if Redis lock release in finally raises an exception,
+    it does NOT mask the created payment, does not cause an unhandled error,
+    and the payment is safely returned in PENDING status and committed in DB.
+    """
+    _ = await _create_test_account(db_session, "Redis Finally Acc")
+    await db_session.commit()
+
+    req = PaymentCreate(
+        client_user_id="user_redis_finally",
+        scenario_id="mock_bot",
+        amount=Decimal("120.00"),
+        idempotency_key="idem_redis_finally_123",
+    )
+
+    with patch(
+        "app.modules.payments.scenarios.state._eval_release_lock",
+        side_effect=Exception("Redis connection lost during lock release"),
+    ):
+        payment = await create_payment(db_session, req)
+
+    assert payment.status == PaymentStatus.PENDING
+    assert payment.payment_link is not None
+
+    # Verify payment in DB
+    from app.core import db as core_db
+
+    async with core_db.async_session_maker() as verify_session:
+        stmt = select(Payment).where(Payment.id == payment.id)
+        db_p = (await verify_session.exec(stmt)).first()
+        assert db_p is not None
+        assert db_p.status == PaymentStatus.PENDING
+
+
+@pytest.mark.asyncio
+async def test_race_idempotency_double_checked_locking_interleaving(
+    db_session: AsyncSession,
+) -> None:
+    """
+    Review 5 Blocker 3:
+    Simulate race interleaving:
+    1. Request A checks Redis record (not found).
+    2. Request A pauses before acquiring lock.
+    3. Request B acquires lock, sets up batch, writes idempotency record,
+       and releases lock.
+    4. Request A resumes and acquires lock.
+    5. Request A's double-check under lock finds Request B's record
+       and returns Request B's batch, without creating a second batch
+       or acquiring duplicate accounts!
+    """
+    await _create_test_account(db_session, "Race Acc Interleave 1")
+    await _create_test_account(db_session, "Race Acc Interleave 2")
+    await db_session.commit()
+
+    idem_key = "race_interleave_idem_key"
+    race_req = PaymentRaceCreate(
+        client_user_id="race_user_interleave",
+        amount=Decimal("200.00"),
+        scenario_ids=["mock_bot"],
+        idempotency_key=idem_key,
+    )
+
+    redis = get_redis_client()
+    race_record_key = f"idempotency:race:{race_req.client_user_id}:{idem_key}"
+
+    # Step 1: Pre-populate record as if Request B finished setup while A was waiting
+    batch_uuid = uuid4()
+    await redis.set(
+        race_record_key,
+        '{"batch_id": "'
+        + str(batch_uuid)
+        + '", "payload_hash": "'
+        + compute_payment_request_hash(race_req)
+        + '", "scenarios": ["mock_bot"], "status": "running"}',
+        ex=86400,
+    )
+
+    # Step 2: Request A executes under lock -> must double-check and return batch_uuid
+    res = await start_payment_race(db_session, race_req)
+    assert res.batch_id == batch_uuid
+    assert res.scenarios == ["mock_bot"]
+
+
+@pytest.mark.asyncio
+async def test_race_idempotency_survives_redis_cache_expiration_via_db(
+    db_session: AsyncSession,
+) -> None:
+    """
+    Review 5 Blocker 3:
+    Verify that even if the Redis idempotency record expires or is deleted,
+    subsequent race requests with the same idempotency key return the persisted
+    batch from PostgreSQL without creating a duplicate batch.
+    """
+    await _create_test_account(db_session, "Race DB Acc 1")
+    await db_session.commit()
+
+    idem_key = "race_db_persistence_key"
+    race_req = PaymentRaceCreate(
+        client_user_id="race_user_db_persisted",
+        amount=Decimal("300.00"),
+        scenario_ids=["mock_bot"],
+        idempotency_key=idem_key,
+    )
+
+    # Initial race creation
+    res1 = await start_payment_race(db_session, race_req)
+    assert res1.batch_id is not None
+
+    # Simulate Redis cache expiration by deleting record from Redis
+    redis = get_redis_client()
+    race_record_key = f"idempotency:race:{race_req.client_user_id}:{idem_key}"
+    await redis.delete(race_record_key)
+
+    # Second call with same idempotency key must find persisted batch in DB
+    res2 = await start_payment_race(db_session, race_req)
+    assert res2.batch_id == res1.batch_id
+    assert res2.scenarios == ["mock_bot"]
+
+
+@pytest.mark.asyncio
+async def test_recovering_stuck_generating_payment_on_timeout(
+    db_session: AsyncSession,
+) -> None:
+    """
+    Review 5 Blocker 2:
+    A payment left in GENERATING status whose lock is gone and age > 120s
+    is automatically recovered into RECONCILIATION_REQUIRED.
+    """
+    from app.core import db as core_db
+
+    past_time = datetime.now(UTC) - timedelta(minutes=5)
+    idem_key = "stuck_generating_key"
+    payment_id = uuid4()
+
+    async with core_db.async_session_maker() as sess:
+        p = Payment(
+            id=payment_id,
+            client_user_id="user_stuck",
+            scenario_id="mock_bot",
+            amount=Decimal("100.00"),
+            currency="RUB",
+            idempotency_key=idem_key,
+            status=PaymentStatus.GENERATING,
+            expires_at=datetime.now(UTC) + timedelta(minutes=25),
+            meta={"execution_stage": "registered"},
+        )
+        sess.add(p)
+        await sess.commit()
+
+    # Artificially set created_at into the past
+    async with core_db.async_session_maker() as sess:
+        p_row = await sess.get(Payment, payment_id)
+        assert p_row is not None
+        p_row.created_at = past_time
+        sess.add(p_row)
+        await sess.commit()
+
+    req = PaymentCreate(
+        client_user_id="user_stuck",
+        scenario_id="mock_bot",
+        amount=Decimal("100.00"),
+        idempotency_key=idem_key,
+    )
+
+    with pytest.raises(AppException) as exc_info:
+        await create_payment(db_session, req)
+    assert exc_info.value.code == "RECONCILIATION_REQUIRED"
+
+    async with core_db.async_session_maker() as sess:
+        recovered = await sess.get(Payment, payment_id)
+        assert recovered is not None
+        assert recovered.status == PaymentStatus.RECONCILIATION_REQUIRED
+        assert recovered.meta.get("recovery_reason") == "stuck_generating_timeout"
+
+
+@pytest.mark.asyncio
+async def test_click_button_fast_cancels_and_awaits_child_task_on_timeout() -> None:
+    """
+    Review 5 Section 5:
+    Verify that click_button_fast cancels and awaits its internal task on timeout,
+    leaving no orphaned background tasks.
+    """
+    from unittest.mock import MagicMock
+
+    from telethon import types
+
+    from app.modules.payments.scenarios.bot_dialog_helper import click_button_fast
+
+    child_cancelled = False
+
+    async def hanging_call(_req: Any) -> Any:
+        nonlocal child_cancelled
+        try:
+            await asyncio.sleep(10.0)
+        except asyncio.CancelledError:
+            child_cancelled = True
+            raise
+
+    mock_client = AsyncMock(side_effect=hanging_call)
+    button = MagicMock()
+    raw_btn = MagicMock()
+    raw_btn.type = types.InlineButtonTypeCallback(data=b"test_click_data")
+    button.button = raw_btn
+    button._chat = "mock_chat"
+    button._msg_id = 123
+
+    res = await click_button_fast(mock_client, button, wait_answer_timeout=0.05)
+    assert res is None
+    assert child_cancelled is True

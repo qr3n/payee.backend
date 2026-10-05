@@ -16,6 +16,7 @@ from typing import Any
 from uuid import UUID
 
 import uuid6
+from redis.asyncio import Redis
 from sqlalchemy.exc import IntegrityError
 from sqlmodel import col, func, select
 from sqlmodel.ext.asyncio.session import AsyncSession
@@ -26,12 +27,16 @@ from app.core.logging import get_logger
 from app.core.redis import get_redis_client
 from app.modules.accounts.models import AccountStatus, TelegramAccount
 from app.modules.payments import race_buffer
-from app.modules.payments.exceptions import NoAccountsAvailableException
+from app.modules.payments.exceptions import (
+    NoAccountsAvailableException,
+    UnknownScenarioException,
+)
 from app.modules.payments.models import Payment, PaymentStatus
 from app.modules.payments.resolvers import resolve_sbp_link
 from app.modules.payments.scenarios import (
     AccountLeaseRenewer,
     AcquiredAccount,
+    BasePaymentScenario,
     GenerationLease,
     LeaseLostException,
     ScenarioContext,
@@ -197,174 +202,208 @@ async def create_payment(
     scenario = scenario_registry.get(payment_in.scenario_id)
 
     # 0. Check idempotency if idempotency_key is provided
+    # Ensure idempotency key is always present so all payments enjoy
+    # DB pre-registration, transaction isolation, and reconciliation safety
+    if not payment_in.idempotency_key:
+        payment_in.idempotency_key = f"auto_{uuid6.uuid7().hex}"
+
     payment_id: UUID = uuid6.uuid7()
     payment: Payment | None = None
     lock_key: str | None = None
     idem_owner_token: str | None = None
     payload_hash: str | None = None
 
-    if payment_in.idempotency_key:
-        payload_hash = compute_payment_request_hash(payment_in)
-        redis = get_redis_client()
-        idem_owner_token = str(uuid6.uuid7())
-        lock_key = (
-            f"lock:idempotency:{payment_in.client_user_id}:{payment_in.idempotency_key}"
-        )
+    payload_hash = compute_payment_request_hash(payment_in)
+    redis = get_redis_client()
+    idem_owner_token = str(uuid6.uuid7())
+    lock_key = (
+        f"lock:idempotency:{payment_in.client_user_id}:{payment_in.idempotency_key}"
+    )
 
-        # 0a. Check DB first
-        stmt = select(Payment).where(
-            Payment.client_user_id == payment_in.client_user_id,
-            Payment.idempotency_key == payment_in.idempotency_key,
-        )
-        existing_idem = (await session.exec(stmt)).first()
-        if existing_idem:
-            stored_hash = existing_idem.meta.get("request_hash")
-            is_same = (
-                stored_hash == payload_hash
-                if stored_hash
-                else (
-                    existing_idem.scenario_id == payment_in.scenario_id
-                    and Decimal(str(existing_idem.amount)).quantize(Decimal("0.01"))
-                    == Decimal(str(payment_in.amount)).quantize(Decimal("0.01"))
-                    and existing_idem.currency.upper() == payment_in.currency.upper()
-                )
+    # 0a. Check DB first
+    stmt = select(Payment).where(
+        Payment.client_user_id == payment_in.client_user_id,
+        Payment.idempotency_key == payment_in.idempotency_key,
+    )
+    existing_idem = (await session.exec(stmt)).first()
+    if existing_idem:
+        stored_hash = existing_idem.meta.get("request_hash")
+        is_same = (
+            stored_hash == payload_hash
+            if stored_hash
+            else (
+                existing_idem.scenario_id == payment_in.scenario_id
+                and Decimal(str(existing_idem.amount)).quantize(Decimal("0.01"))
+                == Decimal(str(payment_in.amount)).quantize(Decimal("0.01"))
+                and existing_idem.currency.upper() == payment_in.currency.upper()
             )
-            if not is_same:
+        )
+        if not is_same:
+            raise AppException(
+                message=(
+                    "Idempotency-Key already used with different payment parameters."
+                ),
+                code="IDEMPOTENCY_CONFLICT",
+                status_code=409,
+            )
+        if existing_idem.status == PaymentStatus.GENERATING:
+            # Check if distributed lock is still active or timed out
+            lock_active = await redis.exists(lock_key)
+            created_dt = existing_idem.created_at
+            if created_dt.tzinfo is None:
+                created_dt = created_dt.replace(tzinfo=UTC)
+            age_sec = (datetime.now(UTC) - created_dt).total_seconds()
+            if not lock_active or age_sec > 120:
+                async with core_db.async_session_maker() as rec_session:
+                    rec_payment = await get_payment_for_update(
+                        rec_session, existing_idem.id
+                    )
+                    if rec_payment and rec_payment.status == PaymentStatus.GENERATING:
+                        rec_payment.status = PaymentStatus.RECONCILIATION_REQUIRED
+                        rec_payment.meta = {
+                            **rec_payment.meta,
+                            "recovery_reason": "stuck_generating_timeout",
+                            "recovered_at": datetime.now(UTC).isoformat(),
+                        }
+                        rec_session.add(rec_payment)
+                        await rec_session.commit()
                 raise AppException(
                     message=(
-                        "Idempotency-Key already used with "
-                        "different payment parameters."
-                    ),
-                    code="IDEMPOTENCY_CONFLICT",
-                    status_code=409,
-                )
-            if existing_idem.status == PaymentStatus.GENERATING:
-                raise AppException(
-                    message=(
-                        "A request with this idempotency key is already in progress."
-                    ),
-                    code="CONCURRENT_IDEMPOTENT_REQUEST",
-                    status_code=409,
-                )
-            if existing_idem.status == PaymentStatus.RECONCILIATION_REQUIRED:
-                raise AppException(
-                    message=(
-                        "Payment with this idempotency key "
-                        "requires manual reconciliation."
+                        "Payment generation timed out and requires manual"
+                        " reconciliation."
                     ),
                     code="RECONCILIATION_REQUIRED",
                     status_code=409,
                 )
-
-            logger.info(
-                "payment_returned_by_idempotency_key",
-                payment_id=str(existing_idem.id),
-                idempotency_key=payment_in.idempotency_key,
-            )
-            return existing_idem
-
-        # 0b. Acquire distributed lease lock in Redis
-        acquired_lock = await redis.set(
-            lock_key,
-            idem_owner_token,
-            nx=True,
-            ex=120,
-        )
-        if not acquired_lock:
-            for _ in range(20):
-                await asyncio.sleep(0.5)
-                existing_idem = (await session.exec(stmt)).first()
-                if existing_idem:
-                    stored_hash = existing_idem.meta.get("request_hash")
-                    if stored_hash and stored_hash != payload_hash:
-                        raise AppException(
-                            message=(
-                                "Idempotency-Key already used with "
-                                "different payment parameters."
-                            ),
-                            code="IDEMPOTENCY_CONFLICT",
-                            status_code=409,
-                        )
-                    if existing_idem.status in (
-                        PaymentStatus.PENDING,
-                        PaymentStatus.PAID,
-                        PaymentStatus.CANCELLED,
-                        PaymentStatus.EXPIRED,
-                        PaymentStatus.FAILED,
-                    ):
-                        return existing_idem
-                    if existing_idem.status == PaymentStatus.RECONCILIATION_REQUIRED:
-                        raise AppException(
-                            message=(
-                                "Payment with this idempotency key "
-                                "requires manual reconciliation."
-                            ),
-                            code="RECONCILIATION_REQUIRED",
-                            status_code=409,
-                        )
-
             raise AppException(
-                message="A request with this idempotency key is already in progress.",
+                message=("A request with this idempotency key is already in progress."),
                 code="CONCURRENT_IDEMPOTENT_REQUEST",
                 status_code=409,
             )
+        if existing_idem.status == PaymentStatus.RECONCILIATION_REQUIRED:
+            raise AppException(
+                message=(
+                    "Payment with this idempotency key requires manual reconciliation."
+                ),
+                code="RECONCILIATION_REQUIRED",
+                status_code=409,
+            )
 
-        # 0c. DB-level pre-registration before external action
-        # in a dedicated transaction
-        async with core_db.async_session_maker() as reg_session:
-            try:
-                reg_payment = Payment(
-                    id=payment_id,
-                    client_user_id=payment_in.client_user_id,
-                    scenario_id=payment_in.scenario_id,
-                    amount=payment_in.amount,
-                    currency=payment_in.currency,
-                    idempotency_key=payment_in.idempotency_key,
-                    status=PaymentStatus.GENERATING,
-                    expires_at=expires_at,
-                    meta={**payment_in.meta, "request_hash": payload_hash},
-                )
-                reg_session.add(reg_payment)
-                await reg_session.commit()
-            except IntegrityError as err:
-                await reg_session.rollback()
-                existing_idem = (await session.exec(stmt)).first()
-                if existing_idem:
-                    stored_hash = existing_idem.meta.get("request_hash")
-                    if stored_hash and stored_hash != payload_hash:
-                        raise AppException(
-                            message=(
-                                "Idempotency-Key already used with "
-                                "different payment parameters."
-                            ),
-                            code="IDEMPOTENCY_CONFLICT",
-                            status_code=409,
-                        ) from err
-                    if existing_idem.status == PaymentStatus.GENERATING:
-                        raise AppException(
-                            message=(
-                                "A request with this idempotency key "
-                                "is already in progress."
-                            ),
-                            code="CONCURRENT_IDEMPOTENT_REQUEST",
-                            status_code=409,
-                        ) from err
-                    if existing_idem.status == PaymentStatus.RECONCILIATION_REQUIRED:
-                        raise AppException(
-                            message=(
-                                "Payment with this idempotency key "
-                                "requires manual reconciliation."
-                            ),
-                            code="RECONCILIATION_REQUIRED",
-                            status_code=409,
-                        ) from err
+        logger.info(
+            "payment_returned_by_idempotency_key",
+            payment_id=str(existing_idem.id),
+            idempotency_key=payment_in.idempotency_key,
+        )
+        return existing_idem
+
+    # 0b. Acquire distributed lease lock in Redis
+    acquired_lock = await redis.set(
+        lock_key,
+        idem_owner_token,
+        nx=True,
+        ex=120,
+    )
+    if not acquired_lock:
+        for _ in range(20):
+            await asyncio.sleep(0.5)
+            existing_idem = (await session.exec(stmt)).first()
+            if existing_idem:
+                stored_hash = existing_idem.meta.get("request_hash")
+                if stored_hash and stored_hash != payload_hash:
+                    raise AppException(
+                        message=(
+                            "Idempotency-Key already used with "
+                            "different payment parameters."
+                        ),
+                        code="IDEMPOTENCY_CONFLICT",
+                        status_code=409,
+                    )
+                if existing_idem.status in (
+                    PaymentStatus.PENDING,
+                    PaymentStatus.PAID,
+                    PaymentStatus.CANCELLED,
+                    PaymentStatus.EXPIRED,
+                    PaymentStatus.FAILED,
+                ):
                     return existing_idem
-                raise
+                if existing_idem.status == PaymentStatus.RECONCILIATION_REQUIRED:
+                    raise AppException(
+                        message=(
+                            "Payment with this idempotency key "
+                            "requires manual reconciliation."
+                        ),
+                        code="RECONCILIATION_REQUIRED",
+                        status_code=409,
+                    )
+
+        raise AppException(
+            message="A request with this idempotency key is already in progress.",
+            code="CONCURRENT_IDEMPOTENT_REQUEST",
+            status_code=409,
+        )
+
+    # 0c. DB-level pre-registration before external action in a dedicated transaction
+    async with core_db.async_session_maker() as reg_session:
+        try:
+            reg_payment = Payment(
+                id=payment_id,
+                client_user_id=payment_in.client_user_id,
+                scenario_id=payment_in.scenario_id,
+                amount=payment_in.amount,
+                currency=payment_in.currency,
+                idempotency_key=payment_in.idempotency_key,
+                status=PaymentStatus.GENERATING,
+                expires_at=expires_at,
+                meta={
+                    **payment_in.meta,
+                    "request_hash": payload_hash,
+                    "execution_stage": "registered",
+                },
+            )
+            reg_session.add(reg_payment)
+            await reg_session.commit()
+        except IntegrityError as err:
+            await reg_session.rollback()
+            existing_idem = (await session.exec(stmt)).first()
+            if existing_idem:
+                stored_hash = existing_idem.meta.get("request_hash")
+                if stored_hash and stored_hash != payload_hash:
+                    raise AppException(
+                        message=(
+                            "Idempotency-Key already used with "
+                            "different payment parameters."
+                        ),
+                        code="IDEMPOTENCY_CONFLICT",
+                        status_code=409,
+                    ) from err
+                if existing_idem.status == PaymentStatus.GENERATING:
+                    raise AppException(
+                        message=(
+                            "A request with this idempotency key "
+                            "is already in progress."
+                        ),
+                        code="CONCURRENT_IDEMPOTENT_REQUEST",
+                        status_code=409,
+                    ) from err
+                if existing_idem.status == PaymentStatus.RECONCILIATION_REQUIRED:
+                    raise AppException(
+                        message=(
+                            "Payment with this idempotency key "
+                            "requires manual reconciliation."
+                        ),
+                        code="RECONCILIATION_REQUIRED",
+                        status_code=409,
+                    ) from err
+                return existing_idem
+            raise
 
     acquired_account: AcquiredAccount | None = None
+    assigned_account_id: UUID | None = None
+    assigned_lease_token: str | None = None
     slot_lock_token: str | None = None
     generation_lock_released = False
     external_call_started = False
+    current_stage = "pre_registered"
     result = None
 
     try:
@@ -415,6 +454,8 @@ async def create_payment(
 
         account = acquired_account.account
         lease = acquired_account.lease
+        assigned_account_id = account.id
+        assigned_lease_token = lease.owner_token
 
         # If scenario requires exclusive pending slot, acquire it now
         if getattr(scenario, "requires_exclusive_pending_slot", False):
@@ -426,24 +467,41 @@ async def create_payment(
                     "All account slots for this provider are busy."
                 )
 
+        # 1c. Record account assignment and context in DB before external call
+        current_stage = "account_assigned"
+        async with core_db.async_session_maker() as assign_session:
+            assign_payment = await get_payment_for_update(assign_session, payment_id)
+            assign_payment.account_id = account.id
+            assign_payment.meta = {
+                **assign_payment.meta,
+                "execution_stage": "account_assigned",
+                "assigned_account_id": str(account.id),
+                "slot_lock_token": slot_lock_token,
+            }
+            assign_session.add(assign_payment)
+            await assign_session.commit()
+
         # 2. Execute scenario to generate payment link with active lease renewal
+        current_stage = "external_call_running"
         ctx = ScenarioContext(
             client_user_id=payment_in.client_user_id,
             amount=payment_in.amount,
             currency=payment_in.currency,
             account=account,
-            meta=payment_in.meta,
+            meta=dict(payment_in.meta),
         )
         async with AccountLeaseRenewer(account.id, lease.owner_token):
             external_call_started = True
             result = await scenario.create_payment(ctx)
 
+        current_stage = "external_call_completed"
         # Release generation lock immediately after Telegram dialog finishes
         # (before external SBP resolution)
         await release_account_generation_lock(account.id, owner_token=lease.owner_token)
         generation_lock_released = True
 
         # 3. Attempt extraction of direct SBP (NSPK) link if supported gateway link
+        current_stage = "sbp_resolving"
         t_resolve_start = time.perf_counter()
         resolved_link, is_resolved = await resolve_sbp_link(result.payment_link)
         resolve_duration = round(time.perf_counter() - t_resolve_start, 2)
@@ -492,52 +550,43 @@ async def create_payment(
         if payload_hash:
             merged_meta["request_hash"] = payload_hash
 
-        # 4. Create or update payment record
-        if payment_in.idempotency_key:
-            payment = await get_payment_for_update(session, payment_id)
-            payment.account_id = account.id
-            payment.status = PaymentStatus.PENDING
-            payment.payment_link = resolved_link
-            payment.meta = merged_meta
-        else:
-            payment = Payment(
-                id=payment_id,
-                client_user_id=payment_in.client_user_id,
-                scenario_id=scenario.scenario_id,
-                amount=payment_in.amount,
-                currency=payment_in.currency,
-                idempotency_key=payment_in.idempotency_key,
-                account_id=account.id,
-                status=PaymentStatus.PENDING,
-                payment_link=resolved_link,
-                expires_at=expires_at,
-                meta=merged_meta,
-            )
+        # 4. Finalize payment record in a dedicated committed transaction
+        current_stage = "finalizing"
+        async with core_db.async_session_maker() as fin_session:
+            fin_payment = await get_payment_for_update(fin_session, payment_id)
+            fin_payment.account_id = account.id
+            fin_payment.status = PaymentStatus.PENDING
+            fin_payment.payment_link = resolved_link
+            fin_payment.meta = merged_meta
+            fin_session.add(fin_payment)
 
-        account.updated_at = now
-        session.add(account)
-        session.add(payment)
-        await session.flush()
-        await session.refresh(payment)
+            acc_stmt = select(TelegramAccount).where(TelegramAccount.id == account.id)
+            fin_acc = (await fin_session.exec(acc_stmt)).first()
+            if fin_acc:
+                fin_acc.updated_at = now
+                fin_session.add(fin_acc)
+
+            await fin_session.commit()
+            await fin_session.refresh(fin_payment)
+            payment = fin_payment
 
         # 5. Save completed idempotency cache in Redis (best-effort)
-        if payment_in.idempotency_key:
-            cache_key = (
-                f"idempotency:payment:{payment_in.client_user_id}:"
-                f"{payment_in.idempotency_key}"
+        cache_key = (
+            f"idempotency:payment:{payment_in.client_user_id}:"
+            f"{payment_in.idempotency_key}"
+        )
+        with contextlib.suppress(Exception):
+            await redis.set(
+                cache_key,
+                json.dumps(
+                    {
+                        "status": "completed",
+                        "payment_id": str(payment.id),
+                        "payload_hash": payload_hash,
+                    }
+                ),
+                ex=86400,
             )
-            with contextlib.suppress(Exception):
-                await redis.set(
-                    cache_key,
-                    json.dumps(
-                        {
-                            "status": "completed",
-                            "payment_id": str(payment.id),
-                            "payload_hash": payload_hash,
-                        }
-                    ),
-                    ex=86400,
-                )
 
         # 6. Trigger non-blocking background re-preparation for subsequent use
         try:
@@ -555,55 +604,106 @@ async def create_payment(
                 error=str(exc),
             )
 
-        return payment
+        # Attach payment to caller's session for identity-map consistency
+        caller_payment = await session.get(Payment, payment_id)
+        return caller_payment or payment
 
     except (Exception, asyncio.CancelledError) as exc:
-        if slot_lock_token and acquired_account:
-            await release_scenario_pending_lock(
-                scenario.scenario_id,
-                acquired_account.account.id,
-                owner_token=slot_lock_token,
-            )
-        if result is not None:
-            stars_tok = result.meta.get("stars_reservation_token")
-            stars_cnt = result.meta.get("stars_count")
-            if stars_tok and stars_cnt:
+        with contextlib.suppress(Exception):
+            await session.rollback()
+
+        stars_tok = (
+            (result.meta if result else ctx.meta).get("stars_reservation_token")
+            if "ctx" in locals()
+            else None
+        )
+        stars_cnt = (
+            (result.meta if result else ctx.meta).get("stars_count")
+            if "ctx" in locals()
+            else None
+        )
+        order_id = (
+            (result.meta if result else ctx.meta).get("order_id")
+            or (result.meta if result else ctx.meta).get("invoice_id")
+            if "ctx" in locals()
+            else None
+        )
+
+        async with core_db.async_session_maker() as err_session:
+            try:
+                err_payment = await get_payment_for_update(err_session, payment_id)
+                is_reconciliation = external_call_started or isinstance(
+                    exc, (LeaseLostException, TimeoutError, asyncio.CancelledError)
+                )
+                if is_reconciliation:
+                    err_payment.status = PaymentStatus.RECONCILIATION_REQUIRED
+                else:
+                    err_payment.status = PaymentStatus.FAILED
+
+                if assigned_account_id:
+                    err_payment.account_id = assigned_account_id
+
+                if result and result.payment_link:
+                    err_payment.payment_link = result.payment_link
+
+                err_payment.meta = {
+                    **err_payment.meta,
+                    **(result.meta if result else {}),
+                    **(ctx.meta if "ctx" in locals() else {}),
+                    "execution_stage": current_stage,
+                    "error": str(exc),
+                    "error_type": type(exc).__name__,
+                    "failed_at": datetime.now(UTC).isoformat(),
+                    "slot_lock_token": slot_lock_token,
+                    "stars_reservation_token": stars_tok,
+                    "stars_count": stars_cnt,
+                    "order_id": order_id,
+                }
+                err_session.add(err_payment)
+                await err_session.commit()
+            except Exception as db_err:
+                await err_session.rollback()
+                logger.error(
+                    "failed_committing_payment_error_status",
+                    error=str(db_err),
+                )
+
+        if slot_lock_token and assigned_account_id:
+            with contextlib.suppress(Exception):
+                await release_scenario_pending_lock(
+                    scenario.scenario_id,
+                    assigned_account_id,
+                    owner_token=slot_lock_token,
+                )
+        if stars_tok and stars_cnt:
+            with contextlib.suppress(Exception):
                 await release_scenario_stars_reservation(
                     scenario.scenario_id, int(stars_cnt), owner_token=str(stars_tok)
                 )
-
-        if payment_in.idempotency_key:
-            # Committed DB update in dedicated transaction
-            # so it survives caller session rollback
-            async with core_db.async_session_maker() as err_session:
-                try:
-                    err_payment = await get_payment_for_update(err_session, payment_id)
-                    if external_call_started or isinstance(
-                        exc, (LeaseLostException, TimeoutError, asyncio.CancelledError)
-                    ):
-                        err_payment.status = PaymentStatus.RECONCILIATION_REQUIRED
-                    else:
-                        err_payment.status = PaymentStatus.FAILED
-                    err_session.add(err_payment)
-                    await err_session.commit()
-                except Exception as db_err:
-                    await err_session.rollback()
-                    logger.error(
-                        "failed_committing_payment_error_status",
-                        error=str(db_err),
-                    )
         raise
 
     finally:
-        if not generation_lock_released and acquired_account:
-            await release_account_generation_lock(
-                acquired_account.account.id,
-                owner_token=acquired_account.lease.owner_token,
-            )
+        if (
+            not generation_lock_released
+            and assigned_account_id
+            and assigned_lease_token
+        ):
+            with contextlib.suppress(Exception):
+                await release_account_generation_lock(
+                    assigned_account_id,
+                    owner_token=assigned_lease_token,
+                )
         if lock_key and idem_owner_token:
             from app.modules.payments.scenarios.state import _eval_release_lock
 
-            await _eval_release_lock(redis, lock_key, idem_owner_token)
+            try:
+                await _eval_release_lock(redis, lock_key, idem_owner_token)
+            except Exception as lock_err:
+                logger.warning(
+                    "failed_releasing_idempotency_lock",
+                    lock_key=lock_key,
+                    error=str(lock_err),
+                )
 
 
 async def get_payment(
@@ -1215,6 +1315,36 @@ async def _run_race_scenario_task(
     slot_lock_token: str | None = None
     generation_lock_released = False
     result: ScenarioResult | None = None
+    child_payment_id: UUID = uuid6.uuid7()
+    external_call_started = False
+    current_stage = "pre_registered"
+
+    # Pre-register child payment row in DB
+    async with async_session_maker() as reg_session:
+        try:
+            reg_payment = Payment(
+                id=child_payment_id,
+                client_user_id=race_in.client_user_id,
+                scenario_id=scenario_id,
+                amount=race_in.amount,
+                currency=race_in.currency,
+                account_id=account.id,
+                batch_id=batch_id,
+                status=PaymentStatus.GENERATING,
+                expires_at=expires_at,
+                meta={
+                    **race_in.meta,
+                    "batch_id": str(batch_id),
+                    "execution_stage": "generating",
+                    "slot_lock_token": slot_lock_token,
+                },
+            )
+            reg_session.add(reg_payment)
+            await reg_session.commit()
+        except Exception as reg_err:
+            logger.warning(
+                "failed_pre_registering_race_child_payment", error=str(reg_err)
+            )
 
     try:
         scenario = _registry.get(scenario_id)
@@ -1233,18 +1363,22 @@ async def _run_race_scenario_task(
             amount=race_in.amount,
             currency=race_in.currency,
             account=account,
-            meta=race_in.meta,
+            meta=dict(race_in.meta),
         )
 
+        current_stage = "external_call_running"
         async with AccountLeaseRenewer(account.id, lease.owner_token):
+            external_call_started = True
             result = await scenario.create_payment(ctx)
 
+        current_stage = "external_call_completed"
         # Release generation lock immediately after Telegram dialog finishes
         # (before external SBP resolution)
         await release_account_generation_lock(account.id, owner_token=lease.owner_token)
         generation_lock_released = True
 
         # SBP resolution
+        current_stage = "sbp_resolving"
         t_resolve_start = time.perf_counter()
         resolved_link, is_resolved = await resolve_sbp_link(result.payment_link)
         resolve_duration = round(time.perf_counter() - t_resolve_start, 2)
@@ -1285,37 +1419,78 @@ async def _run_race_scenario_task(
         }
 
         # Persist payment record (own session + own commit — SSE lifecycle exception)
+        current_stage = "finalizing"
         payment: Payment
         async with async_session_maker() as task_session:
             try:
-                payment = Payment(
-                    client_user_id=race_in.client_user_id,
-                    scenario_id=scenario_id,
-                    amount=race_in.amount,
-                    currency=race_in.currency,
-                    account_id=account.id,
-                    batch_id=batch_id,
-                    status=PaymentStatus.PENDING,
-                    payment_link=resolved_link,
-                    expires_at=expires_at,
-                    meta=merged_meta,
-                )
+                payment = await get_payment_for_update(task_session, child_payment_id)
+                payment.status = PaymentStatus.PENDING
+                payment.payment_link = resolved_link
+                payment.meta = merged_meta
                 task_session.add(payment)
-                await task_session.flush()
-                await task_session.refresh(payment)
                 await task_session.commit()
+                await task_session.refresh(payment)
             except Exception:
                 await task_session.rollback()
                 raise
-    except (asyncio.CancelledError, Exception):
+    except (asyncio.CancelledError, Exception) as exc:
+        stars_tok = (
+            (result.meta if result else ctx.meta).get("stars_reservation_token")
+            if "ctx" in locals()
+            else None
+        )
+        stars_cnt = (
+            (result.meta if result else ctx.meta).get("stars_count")
+            if "ctx" in locals()
+            else None
+        )
+        order_id = (
+            (result.meta if result else ctx.meta).get("order_id")
+            or (result.meta if result else ctx.meta).get("invoice_id")
+            if "ctx" in locals()
+            else None
+        )
+
+        async with async_session_maker() as err_session:
+            with contextlib.suppress(Exception):
+                err_payment = await get_payment_for_update(
+                    err_session, child_payment_id
+                )
+                is_reconciliation = external_call_started or isinstance(
+                    exc,
+                    (LeaseLostException, TimeoutError, asyncio.CancelledError),
+                )
+                if is_reconciliation:
+                    err_payment.status = PaymentStatus.RECONCILIATION_REQUIRED
+                else:
+                    err_payment.status = PaymentStatus.FAILED
+
+                if result and result.payment_link:
+                    err_payment.payment_link = result.payment_link
+
+                err_payment.meta = {
+                    **err_payment.meta,
+                    **(result.meta if result else {}),
+                    **(ctx.meta if "ctx" in locals() else {}),
+                    "execution_stage": current_stage,
+                    "error": str(exc),
+                    "error_type": type(exc).__name__,
+                    "failed_at": datetime.now(UTC).isoformat(),
+                    "slot_lock_token": slot_lock_token,
+                    "stars_reservation_token": stars_tok,
+                    "stars_count": stars_cnt,
+                    "order_id": order_id,
+                }
+                err_session.add(err_payment)
+                await err_session.commit()
+
         if slot_lock_token:
-            await release_scenario_pending_lock(
-                scenario_id, account.id, owner_token=slot_lock_token
-            )
-        if result is not None:
-            stars_tok = result.meta.get("stars_reservation_token")
-            stars_cnt = result.meta.get("stars_count")
-            if stars_tok and stars_cnt:
+            with contextlib.suppress(Exception):
+                await release_scenario_pending_lock(
+                    scenario_id, account.id, owner_token=slot_lock_token
+                )
+        if stars_tok and stars_cnt:
+            with contextlib.suppress(Exception):
                 await release_scenario_stars_reservation(
                     scenario_id, int(stars_cnt), owner_token=str(stars_tok)
                 )
@@ -1323,9 +1498,10 @@ async def _run_race_scenario_task(
     finally:
         # Guarantee generation lock is released once link is obtained or upon error
         if not generation_lock_released:
-            await release_account_generation_lock(
-                account.id, owner_token=lease.owner_token
-            )
+            with contextlib.suppress(Exception):
+                await release_account_generation_lock(
+                    account.id, owner_token=lease.owner_token
+                )
 
     # Trigger warmup for next use (non-blocking, best-effort)
     try:
@@ -1353,6 +1529,39 @@ async def _run_race_scenario_task(
         "stage_timings": all_stages,
     }
     return f"event: payment\ndata: {json.dumps(event_payload, ensure_ascii=False)}\n\n"
+
+
+async def _get_race_idempotency_response(
+    redis: Redis,
+    race_record_key: str,
+    payload_hash: str,
+    default_scenario_ids: list[str] | None,
+) -> PaymentRaceFireResponse | None:
+    """Helper to read and validate race idempotency record from Redis."""
+    raw_record = await redis.get(race_record_key)
+    if not raw_record:
+        return None
+    try:
+        record = json.loads(raw_record)
+        if record.get("payload_hash") and record["payload_hash"] != payload_hash:
+            raise AppException(
+                message="Idempotency-Key already used with different race parameters.",
+                code="IDEMPOTENCY_CONFLICT",
+                status_code=409,
+            )
+        batch_uuid = UUID(record["batch_id"])
+        real_status = await race_buffer.get_race_status(batch_uuid)
+        status_str = (
+            real_status if real_status is not None else record.get("status", "running")
+        )
+        return PaymentRaceFireResponse(
+            batch_id=batch_uuid,
+            status=status_str,
+            scenarios=record.get("scenarios", default_scenario_ids or []),
+        )
+    except (json.JSONDecodeError, KeyError, ValueError) as err:
+        logger.warning("invalid_race_idempotency_record", error=str(err))
+        return None
 
 
 async def start_payment_race(
@@ -1387,90 +1596,81 @@ async def start_payment_race(
         )
         race_lock_token = str(uuid6.uuid7())
 
-        # 0a. Check existing idempotency record
-        raw_record = await redis.get(race_record_key)
-        if raw_record:
-            try:
-                record = json.loads(raw_record)
-                if (
-                    record.get("payload_hash")
-                    and record["payload_hash"] != payload_hash
-                ):
-                    raise AppException(
-                        message=(
-                            "Idempotency-Key already used with "
-                            "different race parameters."
-                        ),
-                        code="IDEMPOTENCY_CONFLICT",
-                        status_code=409,
-                    )
-                batch_uuid = UUID(record["batch_id"])
-                real_status = await race_buffer.get_race_status(batch_uuid)
-                status_str = (
-                    real_status
-                    if real_status is not None
-                    else record.get("status", "running")
+        # Check DB first for persisted batch (survives Redis cache expiration)
+        stmt = select(Payment).where(
+            Payment.client_user_id == race_in.client_user_id,
+            Payment.idempotency_key == race_in.idempotency_key,
+        )
+        existing_batch = (await session.exec(stmt)).first()
+        if existing_batch:
+            stored_hash = existing_batch.meta.get("request_hash")
+            if stored_hash and stored_hash != payload_hash:
+                raise AppException(
+                    message=(
+                        "Idempotency-Key already used with different race parameters."
+                    ),
+                    code="IDEMPOTENCY_CONFLICT",
+                    status_code=409,
                 )
-                return PaymentRaceFireResponse(
-                    batch_id=batch_uuid,
-                    status=status_str,
-                    scenarios=record.get("scenarios", race_in.scenario_ids or []),
-                )
-            except (json.JSONDecodeError, KeyError, ValueError) as err:
-                logger.warning("invalid_race_idempotency_record", error=str(err))
+            batch_uuid = existing_batch.batch_id or existing_batch.id
+            real_status = await race_buffer.get_race_status(batch_uuid)
+            status_str = (
+                real_status
+                if real_status is not None
+                else existing_batch.meta.get("status", "running")
+            )
+            persisted_scenarios = (
+                existing_batch.meta.get("scenarios") or race_in.scenario_ids or []
+            )
+            return PaymentRaceFireResponse(
+                batch_id=batch_uuid,
+                status=status_str,
+                scenarios=persisted_scenarios,
+            )
+
+        # 0a. Check existing idempotency record before acquiring lock
+        existing_resp = await _get_race_idempotency_response(
+            redis, race_record_key, payload_hash, race_in.scenario_ids
+        )
+        if existing_resp:
+            return existing_resp
 
         # 0b. Acquire distributed lock for race creation
         acquired = await redis.set(race_lock_key, race_lock_token, nx=True, ex=120)
         if not acquired:
-            # Re-check record in case concurrent request completed setup
-            raw_record = await redis.get(race_record_key)
-            if raw_record:
-                try:
-                    record = json.loads(raw_record)
-                    if (
-                        record.get("payload_hash")
-                        and record["payload_hash"] != payload_hash
-                    ):
-                        raise AppException(
-                            message=(
-                                "Idempotency-Key already used with "
-                                "different race parameters."
-                            ),
-                            code="IDEMPOTENCY_CONFLICT",
-                            status_code=409,
-                        )
-                    batch_uuid = UUID(record["batch_id"])
-                    real_status = await race_buffer.get_race_status(batch_uuid)
-                    status_str = (
-                        real_status
-                        if real_status is not None
-                        else record.get("status", "running")
-                    )
-                    return PaymentRaceFireResponse(
-                        batch_id=batch_uuid,
-                        status=status_str,
-                        scenarios=record.get("scenarios", race_in.scenario_ids or []),
-                    )
-                except (json.JSONDecodeError, KeyError, ValueError):
-                    pass
+            for _ in range(20):
+                await asyncio.sleep(0.5)
+                existing_resp = await _get_race_idempotency_response(
+                    redis, race_record_key, payload_hash, race_in.scenario_ids
+                )
+                if existing_resp:
+                    return existing_resp
             raise AppException(
                 message="A race with this idempotency key is already in progress.",
                 code="CONCURRENT_IDEMPOTENT_REQUEST",
                 status_code=409,
             )
 
+    pairs: list[tuple[AcquiredAccount, str]] = []
     try:
-        # Resolve scenarios
-        if race_in.scenario_ids:
-            scenarios = [
-                s
-                for s in (scenario_registry.get(sid) for sid in race_in.scenario_ids)
-                if s is not None
-            ]
-        else:
-            scenarios = scenario_registry.list_primary()
+        # 0c. Double-check idempotency record under acquired lock
+        if race_record_key and payload_hash:
+            existing_resp = await _get_race_idempotency_response(
+                redis, race_record_key, payload_hash, race_in.scenario_ids
+            )
+            if existing_resp:
+                return existing_resp
 
-        num_scenarios = len(scenarios)
+        # Resolve scenarios
+        candidate_scenarios: list[BasePaymentScenario] = []
+        if race_in.scenario_ids:
+            for sid in race_in.scenario_ids:
+                with contextlib.suppress(UnknownScenarioException):
+                    candidate_scenarios.append(scenario_registry.get(sid))
+        else:
+            candidate_scenarios = scenario_registry.list_primary()
+
+        num_scenarios = len(candidate_scenarios)
         if num_scenarios == 0:
             raise NoAccountsAvailableException("No valid scenarios to race")
 
@@ -1481,15 +1681,16 @@ async def start_payment_race(
             raise NoAccountsAvailableException()
 
         # Pair accounts with scenarios (exclusive slots first)
-        pairs: list[tuple[AcquiredAccount, str]] = []
         remaining_accounts = list(free_accounts)
 
         exclusive_scenarios = [
-            s for s in scenarios if getattr(s, "requires_exclusive_pending_slot", False)
+            s
+            for s in candidate_scenarios
+            if getattr(s, "requires_exclusive_pending_slot", False)
         ]
         non_exclusive_scenarios = [
             s
-            for s in scenarios
+            for s in candidate_scenarios
             if not getattr(s, "requires_exclusive_pending_slot", False)
         ]
 
@@ -1520,16 +1721,44 @@ async def start_payment_race(
 
         scenario_ids = [sid for _, sid in pairs]
 
+        # Pre-register batch in DB for persistent idempotency
+        if race_in.idempotency_key:
+            async with core_db.async_session_maker() as reg_session:
+                try:
+                    reg_batch = Payment(
+                        id=batch_id,
+                        client_user_id=race_in.client_user_id,
+                        scenario_id="race",
+                        amount=race_in.amount,
+                        currency=race_in.currency,
+                        idempotency_key=race_in.idempotency_key,
+                        batch_id=batch_id,
+                        status=PaymentStatus.PENDING,
+                        expires_at=expires_at,
+                        meta={
+                            **race_in.meta,
+                            "request_hash": payload_hash,
+                            "scenarios": scenario_ids,
+                            "is_race_batch": True,
+                        },
+                    )
+                    reg_session.add(reg_batch)
+                    await reg_session.commit()
+                except IntegrityError:
+                    await reg_session.rollback()
+                    # Concurrent duplicate committed batch
+                    existing_batch = (await session.exec(stmt)).first()
+                    if existing_batch:
+                        return PaymentRaceFireResponse(
+                            batch_id=existing_batch.batch_id or existing_batch.id,
+                            status="running",
+                            scenarios=existing_batch.meta.get(
+                                "scenarios", scenario_ids
+                            ),
+                        )
+
         # Initialize Redis event buffer (pushes "started" event)
-        try:
-            await race_buffer.init_race_buffer(batch_id, scenario_ids)
-        except Exception:
-            for acc, _ in pairs:
-                await release_account_generation_lock(
-                    acc.account.id,
-                    owner_token=acc.lease.owner_token,
-                )
-            raise
+        await race_buffer.init_race_buffer(batch_id, scenario_ids)
 
         if race_record_key:
             await redis.set(
@@ -1542,7 +1771,7 @@ async def start_payment_race(
                         "status": "running",
                     }
                 ),
-                ex=300,  # 5 minutes, matching SSE event buffer TTL
+                ex=86400,  # 24 hours retention, matching payment idempotency retention
             )
 
         # Launch background runner (fire-and-forget)
@@ -1570,11 +1799,21 @@ async def start_payment_race(
             status="running",
             scenarios=scenario_ids,
         )
+    except Exception:
+        # Guarantee release of account generation locks if anything fails in setup
+        for acc, _ in pairs:
+            with contextlib.suppress(Exception):
+                await release_account_generation_lock(
+                    acc.account.id,
+                    owner_token=acc.lease.owner_token,
+                )
+        raise
     finally:
         if race_lock_key and race_lock_token:
             from app.modules.payments.scenarios.state import _eval_release_lock
 
-            await _eval_release_lock(redis, race_lock_key, race_lock_token)
+            with contextlib.suppress(Exception):
+                await _eval_release_lock(redis, race_lock_key, race_lock_token)
 
 
 async def _race_background_runner(

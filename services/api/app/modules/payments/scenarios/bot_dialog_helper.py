@@ -4,6 +4,7 @@ Handles message polling, button clicking, channel joining, and edit tracking.
 """
 
 import asyncio
+import contextlib
 from collections.abc import Callable
 from typing import Any
 
@@ -97,15 +98,21 @@ async def click_button_fast(
         )
         task = asyncio.create_task(client(req))
         try:
-            return await asyncio.wait_for(
-                asyncio.shield(task), timeout=wait_answer_timeout
-            )
+            return await asyncio.wait_for(task, timeout=wait_answer_timeout)
         except (TimeoutError, errors.BotResponseTimeoutError):
             logger.debug(
                 "Bot callback answer timed out (safe to proceed)",
                 btn_text=getattr(button, "text", ""),
             )
+            task.cancel()
+            with contextlib.suppress(Exception, asyncio.CancelledError):
+                await task
             return None
+        except BaseException:
+            task.cancel()
+            with contextlib.suppress(BaseException):
+                await task
+            raise
     return await button.click()
 
 

@@ -124,6 +124,8 @@ class PaymentRead(BaseModel):
     id: UUID
     client_user_id: str
     account_id: UUID | None = None
+    batch_id: UUID | None = None
+    idempotency_key: str | None = None
     scenario_id: str
     amount: Decimal
     currency: str
@@ -144,6 +146,7 @@ class PaymentCreate(BaseModel):
     scenario_id: str = "starslly_bot"
     amount: Decimal
     currency: str = "RUB"
+    idempotency_key: str | None = None
     meta: dict[str, Any] = {}
 
 

@@ -83,6 +83,9 @@ class StarsllyBotScenario(BasePaymentScenario):
         stars_count = allocated.stars
         stars_delta = allocated.delta
         reservation_token = allocated.token
+        ctx.meta["stars_reservation_token"] = reservation_token
+        ctx.meta["stars_count"] = stars_count
+        ctx.meta["stars_delta"] = stars_delta
 
         timer = StageTimer()
         client: TelegramClient | None = None

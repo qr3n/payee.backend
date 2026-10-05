@@ -200,18 +200,38 @@ async def process_bot_notification(
             # If status == "unmatched", proceed to re-attempt matching
             # against active payments
 
-    parsed = parse_bot_payment_message(sender_username, message_text)
-    if not parsed or not parsed.is_success:
-        if message_id is not None and not existing_event:
-            ign_event = NotificationEvent(
+    active_event: NotificationEvent | None = None
+    if message_id is not None:
+        if existing_event:
+            active_event = existing_event
+            active_event.status = "processing"
+            session.add(active_event)
+            await session.flush()
+        else:
+            active_event = NotificationEvent(
                 account_id=account_id,
                 bot_username=norm_bot,
                 message_id=message_id,
                 message_date=message_date,
-                status="ignored",
+                status="processing",
                 raw_text=message_text,
             )
-            session.add(ign_event)
+            session.add(active_event)
+            try:
+                await session.flush()
+            except Exception:
+                logger.warning(
+                    "concurrent_bot_notification_already_registered",
+                    account_id=str(account_id),
+                    message_id=message_id,
+                )
+                return None
+
+    parsed = parse_bot_payment_message(sender_username, message_text)
+    if not parsed or not parsed.is_success:
+        if active_event:
+            active_event.status = "ignored"
+            session.add(active_event)
             await session.flush()
         return None
 
@@ -312,33 +332,33 @@ async def process_bot_notification(
                     break
 
     elif parsed.scenario_id == "starslly_bot":
-        # Find active pending payment on this account
-        stmt = (
-            select(Payment)
-            .where(
-                Payment.scenario_id == "starslly_bot",
-                Payment.account_id == account_id,
-                Payment.status == PaymentStatus.PENDING,
-            )
-            .order_by(col(Payment.created_at).desc())
-        )
-        result = await session.exec(stmt)
-        candidate = result.first()
-        if candidate:
-            # Ensure message does not predate payment creation
-            if message_date and message_date < (
-                candidate.created_at - timedelta(seconds=2)
-            ):
-                logger.warning(
-                    "starslly_notification_predates_payment",
-                    account_id=str(account_id),
-                    payment_id=str(candidate.id),
-                    payment_created=candidate.created_at.isoformat(),
-                    message_date=message_date.isoformat(),
+        # Starslly bot does not provide order_id in success messages.
+        # To prevent cross-order confirmation, ambiguous auto-confirmation
+        # is disabled. If order_id is present, match by order_id; otherwise
+        # require manual reconciliation.
+        if parsed.order_id:
+            stmt = (
+                select(Payment)
+                .where(
+                    Payment.scenario_id == "starslly_bot",
+                    Payment.account_id == account_id,
+                    Payment.status == PaymentStatus.PENDING,
                 )
-                matched_payment = None
-            else:
-                matched_payment = candidate
+                .order_by(col(Payment.created_at).desc())
+            )
+            result = await session.exec(stmt)
+            for p in result.all():
+                if p.meta.get("order_id") == parsed.order_id:
+                    matched_payment = p
+                    break
+        else:
+            logger.warning(
+                "starslly_notification_requires_reconciliation",
+                account_id=str(account_id),
+                scenario_id="starslly_bot",
+                message_id=message_id,
+            )
+            matched_payment = None
 
     if not matched_payment:
         logger.warning(
@@ -349,16 +369,9 @@ async def process_bot_notification(
             stars_count=parsed.stars_count,
             message_id=message_id,
         )
-        if message_id is not None and not existing_event:
-            unmatched_event = NotificationEvent(
-                account_id=account_id,
-                bot_username=norm_bot,
-                message_id=message_id,
-                message_date=message_date,
-                status="unmatched",
-                raw_text=message_text,
-            )
-            session.add(unmatched_event)
+        if active_event:
+            active_event.status = "unmatched"
+            session.add(active_event)
             await session.flush()
         return None
 
@@ -382,22 +395,10 @@ async def process_bot_notification(
         ),
     )
 
-    if message_id is not None:
-        if existing_event:
-            existing_event.status = "processed"
-            existing_event.payment_id = updated_payment.id
-            session.add(existing_event)
-        else:
-            processed_event = NotificationEvent(
-                account_id=account_id,
-                bot_username=norm_bot,
-                message_id=message_id,
-                message_date=message_date,
-                status="processed",
-                payment_id=updated_payment.id,
-                raw_text=message_text,
-            )
-            session.add(processed_event)
+    if active_event:
+        active_event.status = "processed"
+        active_event.payment_id = updated_payment.id
+        session.add(active_event)
         await session.flush()
 
     logger.info(

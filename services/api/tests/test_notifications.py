@@ -250,21 +250,56 @@ async def test_process_bot_notification_starslly_exclusive_slot(
         account_id=sample_account.id,
         status=PaymentStatus.PENDING,
         expires_at=now + timedelta(minutes=30),
-        meta={"stars_count": 50, "slot_lock_token": "token_sl_test"},
+        meta={
+            "stars_count": 50,
+            "slot_lock_token": "token_sl_test",
+            "order_id": "SL-999",
+        },
     )
     db_session.add(payment)
     await db_session.flush()
 
-    text = "✅ Платеж успешно получен!\nВ ближайшее время звезды будут зачислены."
-    with patch(
-        "app.modules.payments.service.release_scenario_pending_lock",
-        new_callable=AsyncMock,
-    ) as mock_release_slot:
+    # 1. Ambiguous message without order_id must NOT auto-confirm
+    ambiguous_text = (
+        "✅ Платеж успешно получен!\nВ ближайшее время звезды будут зачислены."
+    )
+    updated_ambiguous = await process_bot_notification(
+        session=db_session,
+        account_id=sample_account.id,
+        sender_username="starslly_bot",
+        message_text=ambiguous_text,
+    )
+    assert updated_ambiguous is None
+    await db_session.refresh(payment)
+    assert payment.status == PaymentStatus.PENDING
+
+    # 2. Message with specific order_id confirms the exact matching order
+    with (
+        patch(
+            "app.modules.payments.service.release_scenario_pending_lock",
+            new_callable=AsyncMock,
+        ) as mock_release_slot,
+        patch(
+            "app.modules.payments.notifications.parse_starslly_message",
+            return_value=type(
+                "Parsed",
+                (),
+                {
+                    "is_success": True,
+                    "scenario_id": "starslly_bot",
+                    "order_id": "SL-999",
+                    "stars_count": 50,
+                    "recipient": None,
+                    "raw_text": "confirmed SL-999",
+                },
+            )(),
+        ),
+    ):
         updated = await process_bot_notification(
             session=db_session,
             account_id=sample_account.id,
             sender_username="starslly_bot",
-            message_text=text,
+            message_text="confirmed SL-999",
         )
 
     assert updated is not None

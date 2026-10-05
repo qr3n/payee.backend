@@ -14,6 +14,7 @@ from uuid import UUID
 
 import uuid6
 
+from app.core.exceptions import AppException
 from app.core.logging import get_logger
 from app.core.redis import get_redis
 
@@ -249,10 +250,21 @@ async def extend_account_generation_lock(
         return False
 
 
+class LeaseLostException(AppException):
+    """Raised when an account generation lease is lost during dialog execution."""
+
+    def __init__(
+        self, message: str = "Account lease was lost during execution."
+    ) -> None:
+        super().__init__(message=message, code="LEASE_LOST", status_code=409)
+
+
 class AccountLeaseRenewer:
     """
-    Context manager that periodically extends the account generation lock lease
-    in the background while a long-running dialog or preparation is in progress.
+    Context manager that verifies and periodically extends the account generation
+    lock lease in the background. If the lease is lost or stolen at any point,
+    it cancels the caller's task immediately so that conflicting operations
+    cannot continue issuing Telegram dialog commands.
     """
 
     def __init__(
@@ -268,8 +280,21 @@ class AccountLeaseRenewer:
         self.lease_ttl_seconds = lease_ttl_seconds
         self._task: asyncio.Task[None] | None = None
         self._lost_event = asyncio.Event()
+        self._monitored_task: asyncio.Task[Any] | None = None
 
     async def __aenter__(self) -> "AccountLeaseRenewer":
+        # 1. Verify lease ownership immediately before starting
+        owned = await extend_account_generation_lock(
+            self.account_id,
+            self.owner_token,
+            ttl_seconds=self.lease_ttl_seconds,
+        )
+        if not owned:
+            self._lost_event.set()
+            raise LeaseLostException("Account lease is no longer valid upon entry.")
+
+        # Capture the caller's running task so we can cancel it if renewal fails
+        self._monitored_task = asyncio.current_task()
         self._task = asyncio.create_task(self._renew_loop())
         return self
 
@@ -284,6 +309,10 @@ class AccountLeaseRenewer:
             with contextlib.suppress(asyncio.CancelledError):
                 await self._task
 
+        # If the lease was lost, always propagate LeaseLostException
+        if self._lost_event.is_set():
+            raise LeaseLostException("Account lease was lost during execution.")
+
     async def _renew_loop(self) -> None:
         try:
             while True:
@@ -294,11 +323,13 @@ class AccountLeaseRenewer:
                     ttl_seconds=self.lease_ttl_seconds,
                 )
                 if not success:
-                    logger.warning(
-                        "lease_renewal_failed_lock_lost",
+                    logger.error(
+                        "lease_renewal_failed_cancelling_task",
                         account_id=str(self.account_id),
                     )
                     self._lost_event.set()
+                    if self._monitored_task and not self._monitored_task.done():
+                        self._monitored_task.cancel()
                     break
         except asyncio.CancelledError:
             pass

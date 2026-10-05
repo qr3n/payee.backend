@@ -7,8 +7,10 @@ import time
 from datetime import UTC, datetime, timedelta
 from decimal import Decimal
 from unittest.mock import AsyncMock, patch
+from uuid import uuid4
 
 import pytest
+from sqlmodel import select
 from sqlmodel.ext.asyncio.session import AsyncSession
 
 from app.core.exceptions import AppException
@@ -43,6 +45,7 @@ from app.modules.payments.service import (
     list_payments_paginated,
     mark_payment_status,
     release_all_locked_accounts,
+    start_payment_race,
 )
 from app.shared.pagination import PageParams
 from tests.test_accounts_service import VALID_SESSION_STRING
@@ -571,7 +574,7 @@ async def test_concurrent_idempotency_pre_registration(
     Test that concurrent requests with same idempotency key return the
     same payment and execute external scenario creation only once.
     """
-    from app.core.db import async_session_maker
+    from app.core import db as core_db
     from app.modules.payments.scenarios.base import ScenarioResult
     from app.modules.payments.scenarios.registry import scenario_registry
 
@@ -600,7 +603,7 @@ async def test_concurrent_idempotency_pre_registration(
     try:
 
         async def run_in_session() -> Payment:
-            async with async_session_maker() as sess:
+            async with core_db.async_session_maker() as sess:
                 p = await create_payment(sess, req)
                 await sess.commit()
                 return p
@@ -792,3 +795,288 @@ async def test_race_timeout_saves_timeout_status() -> None:
         await runner_task
         status = await race_buffer.get_race_status(batch_id)
         assert status == "timeout"
+
+
+@pytest.mark.asyncio
+async def test_post_creation_error_persists_reconciliation_required(
+    db_session: AsyncSession,
+) -> None:
+    """
+    Criterion 1 & 2:
+    Verify that if an error occurs after scenario creation starts, the payment
+    is committed to DB with RECONCILIATION_REQUIRED via dedicated transaction,
+    surviving the caller's session rollback. Subsequent calls with the same key
+    are rejected with 409 RECONCILIATION_REQUIRED without creating a new invoice.
+    """
+    from app.core import db as core_db
+    from app.modules.payments.scenarios.base import ScenarioResult
+    from app.modules.payments.scenarios.registry import scenario_registry
+
+    await _create_test_account(db_session, "Recon Account")
+    await db_session.commit()
+
+    idem_key = f"key_recon_{uuid4().hex[:8]}"
+    req = PaymentCreate(
+        client_user_id="recon_user_1",
+        scenario_id="mock_bot",
+        amount=Decimal("200.00"),
+        idempotency_key=idem_key,
+    )
+
+    scenario = scenario_registry.get("mock_bot")
+    assert scenario is not None
+    orig_create = scenario.create_payment
+    call_count = 0
+
+    async def fail_after_external(ctx: ScenarioContext) -> ScenarioResult:
+        nonlocal call_count
+        call_count += 1
+        # Returns link, but simulate failure right afterwards
+        await orig_create(ctx)
+        raise RuntimeError("Simulated network timeout/disconnect after invoice created")
+
+    scenario.create_payment = fail_after_external  # type: ignore[method-assign]
+    try:
+        # Simulate caller session failing and rolling back
+        async with core_db.async_session_maker() as caller_session:
+            with pytest.raises(RuntimeError):
+                await create_payment(caller_session, req)
+            await caller_session.rollback()
+
+        # In a completely new independent session, check that the row exists
+        # and has status RECONCILIATION_REQUIRED
+        async with core_db.async_session_maker() as check_session:
+            stmt = select(Payment).where(
+                Payment.client_user_id == req.client_user_id,
+                Payment.idempotency_key == idem_key,
+            )
+            saved = (await check_session.exec(stmt)).first()
+            assert saved is not None
+            assert saved.status == PaymentStatus.RECONCILIATION_REQUIRED
+
+        # Re-attempt with the same idempotency key
+        async with core_db.async_session_maker() as retry_session:
+            with pytest.raises(AppException) as exc_info:
+                await create_payment(retry_session, req)
+            assert exc_info.value.code == "RECONCILIATION_REQUIRED"
+            # Scenario was NOT called a second time
+            assert call_count == 1
+    finally:
+        scenario.create_payment = orig_create  # type: ignore[method-assign]
+
+
+@pytest.mark.asyncio
+async def test_lease_loss_actively_cancels_monitored_task() -> None:
+    """
+    Criterion 3:
+    Verify that AccountLeaseRenewer actively cancels the running task
+    when the lease is stolen/lost and propagates LeaseLostException.
+    """
+    from app.modules.payments.scenarios.state import (
+        AccountLeaseRenewer,
+        LeaseLostException,
+    )
+
+    acc_id = uuid4()
+    owner_token = "valid_owner_token"
+    redis = get_redis_client()
+    lock_key = f"lock:account_generation:{acc_id}"
+    await redis.set(lock_key, owner_token, ex=60)
+
+    task_interrupted = False
+
+    async def long_dialog() -> None:
+        nonlocal task_interrupted
+        async with AccountLeaseRenewer(
+            acc_id, owner_token, interval_seconds=0.05, lease_ttl_seconds=1
+        ):
+            try:
+                for _ in range(50):
+                    await asyncio.sleep(0.02)
+            except asyncio.CancelledError:
+                task_interrupted = True
+                raise
+
+    dialog_task = asyncio.create_task(long_dialog())
+    # Allow dialog to start and acquire lease
+    await asyncio.sleep(0.02)
+
+    # Steal the lease by overwriting the Redis lock with a different token
+    await redis.set(lock_key, "stolen_owner_token", ex=60)
+
+    # Await dialog_task — should raise LeaseLostException out of context manager
+    with pytest.raises(LeaseLostException):
+        await dialog_task
+
+    assert task_interrupted is True
+
+
+@pytest.mark.asyncio
+async def test_recipient_username_normalization_and_conflict(
+    db_session: AsyncSession,
+) -> None:
+    """
+    Criterion 4 & 5:
+    Verify that request hash properly canonicalizes recipient_username
+    (case-insensitive, strips @) and detects conflicts when changed.
+    """
+    from app.core import db as core_db
+
+    await _create_test_account(db_session, "Norm Account")
+    await db_session.commit()
+
+    idem_key = f"idem_norm_{uuid4().hex[:8]}"
+    req1 = PaymentCreate(
+        client_user_id="norm_user_1",
+        scenario_id="mock_bot",
+        amount=Decimal("100.00"),
+        idempotency_key=idem_key,
+        meta={"recipient_username": "@Alice"},
+    )
+
+    async with core_db.async_session_maker() as s1:
+        p1 = await create_payment(s1, req1)
+        await s1.commit()
+
+    # Same key with canonical match "@alice" or "alice"
+    req2 = PaymentCreate(
+        client_user_id="norm_user_1",
+        scenario_id="mock_bot",
+        amount=Decimal("100.00"),
+        idempotency_key=idem_key,
+        meta={"recipient_username": "alice"},
+    )
+    async with core_db.async_session_maker() as s2:
+        p2 = await create_payment(s2, req2)
+        assert p2.id == p1.id
+
+    # Same key with DIFFERENT recipient -> must raise 409 IDEMPOTENCY_CONFLICT
+    req3 = PaymentCreate(
+        client_user_id="norm_user_1",
+        scenario_id="mock_bot",
+        amount=Decimal("100.00"),
+        idempotency_key=idem_key,
+        meta={"recipient_username": "bob"},
+    )
+    async with core_db.async_session_maker() as s3:
+        with pytest.raises(AppException) as exc_info:
+            await create_payment(s3, req3)
+        assert exc_info.value.code == "IDEMPOTENCY_CONFLICT"
+
+
+@pytest.mark.asyncio
+async def test_race_idempotency_atomic_and_conflict(
+    db_session: AsyncSession,
+) -> None:
+    """
+    Criterion 4 (Race):
+    Verify that concurrent or repeated race creation requests with the same
+    idempotency key return the same batch ID, and parameters mismatch raises 409.
+    """
+    await _create_test_account(db_session, "Race Account 1")
+    await db_session.commit()
+
+    idem_key = f"race_idem_{uuid4().hex[:8]}"
+    race_req = PaymentRaceCreate(
+        client_user_id="race_user_1",
+        amount=Decimal("100.00"),
+        scenario_ids=["mock_bot"],
+        idempotency_key=idem_key,
+    )
+
+    res1 = await start_payment_race(db_session, race_req)
+    assert res1.batch_id is not None
+    assert res1.status in ("running", "done")
+
+    # Repeat call with identical params returns existing batch
+    res2 = await start_payment_race(db_session, race_req)
+    assert res2.batch_id == res1.batch_id
+
+    # Changed amount with same idempotency key raises conflict
+    race_req_diff = PaymentRaceCreate(
+        client_user_id="race_user_1",
+        amount=Decimal("200.00"),
+        scenario_ids=["mock_bot"],
+        idempotency_key=idem_key,
+    )
+    with pytest.raises(AppException) as exc:
+        await start_payment_race(db_session, race_req_diff)
+    assert exc.value.code == "IDEMPOTENCY_CONFLICT"
+
+
+@pytest.mark.asyncio
+async def test_mark_payment_status_disallows_illegal_transitions(
+    db_session: AsyncSession,
+) -> None:
+    """
+    Criterion 7:
+    Verify that ALLOWED_CALLBACK_TRANSITIONS strictly blocks illegal transitions
+    such as PENDING -> GENERATING, or cancellation of non-PENDING payments.
+    """
+    acc = await _create_test_account(db_session, "Transition Account")
+    payment = Payment(
+        client_user_id="user_trans",
+        scenario_id="mock_bot",
+        amount=Decimal("50.00"),
+        currency="XTR",
+        account_id=acc.id,
+        status=PaymentStatus.PENDING,
+        payment_link="https://t.me/$test",
+        expires_at=datetime.now(UTC) + timedelta(minutes=15),
+    )
+    db_session.add(payment)
+    await db_session.commit()
+    await db_session.refresh(payment)
+
+    # Attempt transition PENDING -> GENERATING
+    callback = PaymentCallback(status=PaymentStatus.GENERATING)
+    with pytest.raises(AppException) as exc_info:
+        await mark_payment_status(db_session, payment, callback)
+    assert exc_info.value.code == "INVALID_PAYMENT_TRANSITION"
+
+    # Attempt transition PENDING -> RECONCILIATION_REQUIRED
+    callback_recon = PaymentCallback(status=PaymentStatus.RECONCILIATION_REQUIRED)
+    with pytest.raises(AppException) as exc_info2:
+        await mark_payment_status(db_session, payment, callback_recon)
+    assert exc_info2.value.code == "INVALID_PAYMENT_TRANSITION"
+
+
+@pytest.mark.asyncio
+async def test_run_race_scenario_task_slot_failure_retains_cause() -> None:
+    """
+    Criterion 8:
+    Verify that _run_race_scenario_task defines result before try, so that
+    a failure during slot acquisition or registry lookup preserves the
+    original error without raising UnboundLocalError.
+    """
+    from app.modules.payments.scenarios.state import GenerationLease
+    from app.modules.payments.service import _run_race_scenario_task
+
+    acc = TelegramAccount(
+        id=uuid4(),
+        title="Slot Test Acc",
+        phone="+1234567890",
+        session_string="mock_session",
+        device_model="PC 64bit",
+        system_version="Windows 11",
+        app_version="5.2.2 x64",
+    )
+    lease = GenerationLease(account_id=acc.id, owner_token="lease_slot_tok")
+    acquired = AcquiredAccount(account=acc, lease=lease)
+
+    race_in = PaymentRaceCreate(
+        client_user_id="user_slot_fail",
+        amount=Decimal("100.00"),
+    )
+
+    # Request a non-existent scenario to trigger error before result assignment
+    with pytest.raises(UnknownScenarioException) as exc:
+        await _run_race_scenario_task(
+            acquired=acquired,
+            scenario_id="non_existent_scenario_xyz",
+            batch_id=uuid4(),
+            race_in=race_in,
+            expires_at=datetime.now(UTC) + timedelta(minutes=10),
+            race_start=time.perf_counter(),
+        )
+    assert "not registered" in str(exc.value)

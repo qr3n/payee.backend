@@ -409,3 +409,21 @@ async def test_helperstars_fast_path_validation() -> None:
         expected_bot_username="helperstars_bot",
         expected_fingerprint="fp1",
     )
+
+    # 6. Missing fingerprint in context -> cache miss!
+    await set_scenario_prepared(
+        acc_id,
+        "helperstars_bot",
+        context={
+            "recipient": "@alice",
+            "bot_username": "helperstars_bot",
+            # fingerprint omitted
+        },
+    )
+    assert not await is_scenario_prepared(
+        acc_id,
+        "helperstars_bot",
+        expected_recipient="@alice",
+        expected_bot_username="helperstars_bot",
+        expected_fingerprint="fp1",
+    )

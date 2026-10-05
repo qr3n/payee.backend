@@ -617,10 +617,18 @@ class HelperStarsBotScenario(BasePaymentScenario):
                 min_id=send_user_msg.id,
             )
 
+            from app.modules.accounts.session_pool import (
+                compute_account_fingerprint,
+            )
+
             await set_scenario_prepared(
                 account.id,
                 self.scenario_id,
-                context={"recipient": recipient, "bot_username": bot_username},
+                context={
+                    "recipient": recipient,
+                    "bot_username": bot_username,
+                    "fingerprint": compute_account_fingerprint(account),
+                },
             )
             logger.info("helperstars_prepare_completed", account_id=str(account.id))
             return PreparationResult(status="ok")

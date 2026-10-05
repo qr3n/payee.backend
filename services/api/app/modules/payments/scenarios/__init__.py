@@ -28,6 +28,7 @@ from app.modules.payments.scenarios.starslly_scenario import (
     StarsllyBotScenario,
 )
 from app.modules.payments.scenarios.state import (
+    AccountLeaseRenewer,
     AcquiredAccount,
     GenerationLease,
     acquire_account_generation_lock,
@@ -48,6 +49,7 @@ from app.modules.payments.scenarios.state import (
 )
 
 __all__ = [
+    "AccountLeaseRenewer",
     "AcquiredAccount",
     "BasePaymentScenario",
     "GenerationLease",

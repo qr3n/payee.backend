@@ -5,6 +5,8 @@ at the amount input prompt (fast-path ready).
 Implements fail-closed distributed locks with owner tokens and Lua release scripts.
 """
 
+import asyncio
+import contextlib
 import json
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any
@@ -104,16 +106,16 @@ async def is_scenario_prepared(
 
     if expected_bot_username is not None:
         stored_bot = ctx.get("bot_username")
-        if stored_bot:
-            norm_exp_bot = expected_bot_username.lstrip("@").lower()
-            norm_act_bot = str(stored_bot).lstrip("@").lower()
-            if norm_exp_bot != norm_act_bot:
-                return False
-
-    if expected_fingerprint is not None:
-        stored_fp = ctx.get("fingerprint")
-        if stored_fp and stored_fp != expected_fingerprint:
+        if not isinstance(stored_bot, str):
             return False
+        if stored_bot.lstrip("@").lower() != expected_bot_username.lstrip("@").lower():
+            return False
+
+    if (
+        expected_fingerprint is not None
+        and ctx.get("fingerprint") != expected_fingerprint
+    ):
+        return False
 
     if expected_recipient is not None:
         stored_recipient = ctx.get("recipient")
@@ -245,6 +247,65 @@ async def extend_account_generation_lock(
             error=str(exc),
         )
         return False
+
+
+class AccountLeaseRenewer:
+    """
+    Context manager that periodically extends the account generation lock lease
+    in the background while a long-running dialog or preparation is in progress.
+    """
+
+    def __init__(
+        self,
+        account_id: UUID | str,
+        owner_token: str,
+        interval_seconds: float = 30.0,
+        lease_ttl_seconds: int = 90,
+    ) -> None:
+        self.account_id = account_id
+        self.owner_token = owner_token
+        self.interval_seconds = interval_seconds
+        self.lease_ttl_seconds = lease_ttl_seconds
+        self._task: asyncio.Task[None] | None = None
+        self._lost_event = asyncio.Event()
+
+    async def __aenter__(self) -> "AccountLeaseRenewer":
+        self._task = asyncio.create_task(self._renew_loop())
+        return self
+
+    async def __aexit__(
+        self,
+        exc_type: type[BaseException] | None,
+        exc_val: BaseException | None,
+        exc_tb: Any,
+    ) -> None:
+        if self._task and not self._task.done():
+            self._task.cancel()
+            with contextlib.suppress(asyncio.CancelledError):
+                await self._task
+
+    async def _renew_loop(self) -> None:
+        try:
+            while True:
+                await asyncio.sleep(self.interval_seconds)
+                success = await extend_account_generation_lock(
+                    self.account_id,
+                    self.owner_token,
+                    ttl_seconds=self.lease_ttl_seconds,
+                )
+                if not success:
+                    logger.warning(
+                        "lease_renewal_failed_lock_lost",
+                        account_id=str(self.account_id),
+                    )
+                    self._lost_event.set()
+                    break
+        except asyncio.CancelledError:
+            pass
+
+    @property
+    def is_lost(self) -> bool:
+        return self._lost_event.is_set()
 
 
 async def release_account_generation_lock(

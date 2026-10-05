@@ -130,6 +130,12 @@ class PaymentRaceCreate(BaseModel):
         description="Additional scenario-specific arguments",
         examples=[{}],
     )
+    idempotency_key: str | None = Field(
+        default=None,
+        max_length=128,
+        description="Optional idempotency key to prevent duplicate race launches",
+        examples=["race_idem_123"],
+    )
 
 
 class PaymentRaceEvent(BaseModel):

@@ -6,7 +6,7 @@ from datetime import datetime
 from typing import Any
 from uuid import UUID
 
-from pydantic import BaseModel, Field, field_validator
+from pydantic import BaseModel, Field, field_validator, model_validator
 from sqlmodel import SQLModel
 
 from app.modules.accounts.models import AccountStatus
@@ -164,14 +164,11 @@ class TelegramAccountUpdate(SQLModel):
 
     @field_validator(
         "title",
-        "phone",
         "device_model",
         "system_version",
         "app_version",
         "system_lang_code",
         "lang_code",
-        "api_id",
-        "api_hash",
         "status",
         "session_string",
         mode="before",
@@ -181,6 +178,14 @@ class TelegramAccountUpdate(SQLModel):
         if v is None:
             raise ValueError(f"Field '{info.field_name}' cannot be null.")
         return v
+
+    @model_validator(mode="after")
+    def validate_api_credentials(self) -> "TelegramAccountUpdate":
+        if (self.api_id is not None and self.api_hash is None) or (
+            self.api_hash is not None and self.api_id is None
+        ):
+            raise ValueError("Both 'api_id' and 'api_hash' must be provided together.")
+        return self
 
     @field_validator("proxy_url")
     @classmethod

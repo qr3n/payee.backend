@@ -26,11 +26,13 @@ from app.shared.models import BaseUUIDModel
 class PaymentStatus(StrEnum):
     """Lifecycle statuses for a payment transaction."""
 
+    GENERATING = "generating"
     PENDING = "pending"
     PAID = "paid"
     CANCELLED = "cancelled"
     EXPIRED = "expired"
     FAILED = "failed"
+    RECONCILIATION_REQUIRED = "reconciliation_required"
 
 
 class PaymentBase(SQLModel):
@@ -74,6 +76,13 @@ class Payment(PaymentBase, BaseUUIDModel, table=True):
     """Database entity representing an active or completed payment."""
 
     __tablename__ = "payments"
+    __table_args__ = (
+        UniqueConstraint(
+            "client_user_id",
+            "idempotency_key",
+            name="uq_payments_client_idempotency",
+        ),
+    )
 
     account_id: UUID | None = Field(
         default=None,

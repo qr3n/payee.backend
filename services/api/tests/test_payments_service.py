@@ -18,7 +18,7 @@ from app.modules.payments.exceptions import (
     NoAccountsAvailableException,
     UnknownScenarioException,
 )
-from app.modules.payments.models import PaymentStatus
+from app.modules.payments.models import Payment, PaymentStatus
 from app.modules.payments.scenarios import (
     BasePaymentScenario,
     PreparationResult,
@@ -569,9 +569,14 @@ async def test_concurrent_idempotency_pre_registration(
 ) -> None:
     """
     Test that concurrent requests with same idempotency key return the
-    same payment.
+    same payment and execute external scenario creation only once.
     """
+    from app.core.db import async_session_maker
+    from app.modules.payments.scenarios.base import ScenarioResult
+    from app.modules.payments.scenarios.registry import scenario_registry
+
     await _create_test_account(db_session, "Idem Account")
+    await db_session.commit()
 
     req = PaymentCreate(
         client_user_id="idem_user_1",
@@ -580,21 +585,46 @@ async def test_concurrent_idempotency_pre_registration(
         idempotency_key="key_concurrent_123",
     )
 
-    # Run two concurrent creates
-    p1, p2 = await asyncio.gather(
-        create_payment(db_session, req),
-        create_payment(db_session, req),
-    )
+    scenario = scenario_registry.get("mock_bot")
+    assert scenario is not None
+    original_create = scenario.create_payment
+    call_count = 0
 
-    assert p1.id == p2.id
-    assert p1.status == PaymentStatus.PENDING
+    async def counting_create(ctx: ScenarioContext) -> ScenarioResult:
+        nonlocal call_count
+        call_count += 1
+        await asyncio.sleep(0.05)
+        return await original_create(ctx)
+
+    scenario.create_payment = counting_create  # type: ignore[method-assign]
+    try:
+
+        async def run_in_session() -> Payment:
+            async with async_session_maker() as sess:
+                p = await create_payment(sess, req)
+                await sess.commit()
+                return p
+
+        p1, p2 = await asyncio.gather(run_in_session(), run_in_session())
+
+        assert p1.id == p2.id
+        assert p1.status == PaymentStatus.PENDING
+        assert call_count == 1
+    finally:
+        scenario.create_payment = original_create  # type: ignore[method-assign]
 
 
 @pytest.mark.asyncio
 async def test_concurrent_status_transitions_paid_blocks_cancel(
     db_session: AsyncSession,
 ) -> None:
-    """Test that once a payment is marked PAID, cancelling it raises 409 conflict."""
+    """
+    Test that two independent sessions reading PENDING row under FOR UPDATE
+    enforce proper isolation: first session commits PAID, second session's
+    cancel_payment sees PAID via populate_existing and raises 409 conflict.
+    """
+    from app.core.db import async_session_maker
+
     await _create_test_account(db_session, "Conflict Acc")
     payment = await create_payment(
         db_session,
@@ -604,27 +634,40 @@ async def test_concurrent_status_transitions_paid_blocks_cancel(
             amount=Decimal("200.00"),
         ),
     )
+    await db_session.commit()
+    payment_id = payment.id
 
-    # Mark as PAID
-    await mark_payment_status(
-        db_session,
-        payment,
-        PaymentCallback(status=PaymentStatus.PAID),
-    )
+    async with async_session_maker() as session_a, async_session_maker() as session_b:
+        # Both sessions load the payment as PENDING
+        p_a = await session_a.get(Payment, payment_id)
+        p_b = await session_b.get(Payment, payment_id)
+        assert p_a is not None and p_b is not None
+        assert p_a.status == PaymentStatus.PENDING
+        assert p_b.status == PaymentStatus.PENDING
 
-    # Attempt to cancel must fail with 409
-    with pytest.raises(AppException) as exc_info:
-        await cancel_payment(db_session, payment)
-    assert exc_info.value.status_code == 409
-    assert exc_info.value.code == "PAYMENT_ALREADY_PAID"
+        # Session A marks PAID and commits
+        await mark_payment_status(
+            session_a,
+            p_a,
+            PaymentCallback(status=PaymentStatus.PAID),
+        )
+        await session_a.commit()
+
+        # Session B attempts to cancel using its stale in-memory entity
+        # get_payment_for_update with populate_existing=True ensures it reloads from DB
+        with pytest.raises(AppException) as exc_info:
+            await cancel_payment(session_b, p_b)
+        assert exc_info.value.status_code == 409
+        assert exc_info.value.code == "PAYMENT_ALREADY_PAID"
 
 
 @pytest.mark.asyncio
 async def test_race_cancellation_saves_terminal_status() -> None:
     """
     Test that cancelling the race background runner finishes race with
-    status 'cancelled'.
+    status 'cancelled' using a deterministic blocked scenario.
     """
+    from unittest.mock import patch
     from uuid import uuid4
 
     from app.modules.payments import race_buffer
@@ -652,21 +695,100 @@ async def test_race_cancellation_saves_terminal_status() -> None:
         timeout_sec=5.0,
     )
 
-    runner_task = asyncio.create_task(
-        _race_background_runner(
-            pairs=[(acquired, "mock_bot")],
-            batch_id=batch_id,
-            race_in=race_in,
-            expires_at=datetime.now(UTC) + timedelta(minutes=10),
-            race_start=time.perf_counter(),
+    started = asyncio.Event()
+    release = asyncio.Event()
+    stopped = asyncio.Event()
+
+    async def blocked_scenario(**_kwargs: object) -> str:
+        started.set()
+        try:
+            await release.wait()
+            return "event: payment\ndata: {}\n\n"
+        finally:
+            stopped.set()
+
+    with patch(
+        "app.modules.payments.service._run_race_scenario_task",
+        new=blocked_scenario,
+    ):
+        runner_task = asyncio.create_task(
+            _race_background_runner(
+                pairs=[(acquired, "mock_bot")],
+                batch_id=batch_id,
+                race_in=race_in,
+                expires_at=datetime.now(UTC) + timedelta(minutes=10),
+                race_start=time.perf_counter(),
+            )
         )
+
+        try:
+            await asyncio.wait_for(started.wait(), timeout=1.0)
+            assert not runner_task.done()
+
+            runner_task.cancel()
+            with pytest.raises(asyncio.CancelledError):
+                await runner_task
+
+            assert stopped.is_set()
+            assert await race_buffer.get_race_status(batch_id) == "cancelled"
+        finally:
+            if not runner_task.done():
+                runner_task.cancel()
+            await asyncio.gather(runner_task, return_exceptions=True)
+
+
+@pytest.mark.asyncio
+async def test_race_timeout_saves_timeout_status() -> None:
+    """
+    Test that when the race timeout deadline is exceeded, the race finishes
+    with terminal status 'timeout' (not 'cancelled').
+    """
+    from unittest.mock import patch
+    from uuid import uuid4
+
+    from app.modules.payments import race_buffer
+    from app.modules.payments.scenarios.state import GenerationLease
+    from app.modules.payments.service import _race_background_runner
+
+    batch_id = uuid4()
+    await race_buffer.init_race_buffer(batch_id, ["mock_bot"])
+
+    acc = TelegramAccount(
+        id=uuid4(),
+        title="Timeout Acc",
+        phone="+1234567890",
+        session_string="mock_session",
+        device_model="PC 64bit",
+        system_version="Windows 11",
+        app_version="5.2.2 x64",
+    )
+    lease = GenerationLease(account_id=acc.id, owner_token="lease_timeout_tok")
+    acquired = AcquiredAccount(account=acc, lease=lease)
+
+    race_in = PaymentRaceCreate(
+        client_user_id="user_timeout",
+        amount=Decimal("100.00"),
+        timeout_sec=0.1,  # Short timeout
     )
 
-    # Allow runner task to start execution
-    await asyncio.sleep(0.01)
-    runner_task.cancel()
-    with pytest.raises(asyncio.CancelledError):
-        await runner_task
+    async def slow_scenario(**_kwargs: object) -> str:
+        await asyncio.sleep(1.0)
+        return "event: payment\ndata: {}\n\n"
 
-    status = await race_buffer.get_race_status(batch_id)
-    assert status == "cancelled"
+    with patch(
+        "app.modules.payments.service._run_race_scenario_task",
+        new=slow_scenario,
+    ):
+        runner_task = asyncio.create_task(
+            _race_background_runner(
+                pairs=[(acquired, "mock_bot")],
+                batch_id=batch_id,
+                race_in=race_in,
+                expires_at=datetime.now(UTC) + timedelta(minutes=10),
+                race_start=time.perf_counter(),
+            )
+        )
+
+        await runner_task
+        status = await race_buffer.get_race_status(batch_id)
+        assert status == "timeout"

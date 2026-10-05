@@ -5,19 +5,22 @@ and scenario dispatch. Follows Unit of Work: NEVER calls session.commit().
 """
 
 import asyncio
+import contextlib
 import hashlib
 import json
 import time
 from collections.abc import AsyncGenerator, Sequence
 from datetime import UTC, datetime, timedelta
+from decimal import Decimal
 from typing import Any
 from uuid import UUID
 
 import uuid6
+from sqlalchemy.exc import IntegrityError
 from sqlmodel import col, func, select
 from sqlmodel.ext.asyncio.session import AsyncSession
 
-from app.core.exceptions import AppException
+from app.core.exceptions import AppException, NotFoundException
 from app.core.logging import get_logger
 from app.core.redis import get_redis_client
 from app.modules.accounts.models import AccountStatus, TelegramAccount
@@ -26,6 +29,7 @@ from app.modules.payments.exceptions import NoAccountsAvailableException
 from app.modules.payments.models import Payment, PaymentStatus
 from app.modules.payments.resolvers import resolve_sbp_link
 from app.modules.payments.scenarios import (
+    AccountLeaseRenewer,
     AcquiredAccount,
     GenerationLease,
     ScenarioContext,
@@ -34,9 +38,6 @@ from app.modules.payments.scenarios import (
     is_account_generation_locked,
     is_scenario_pending_locked,
     release_account_generation_lock,
-    release_all_account_generation_locks,
-    release_all_scenario_pending_locks,
-    release_all_scenario_stars_reservations,
     release_scenario_pending_lock,
     release_scenario_stars_reservation,
     scenario_registry,
@@ -55,6 +56,39 @@ PAYMENT_TTL_MINUTES = 30
 
 # Prevent garbage-collection of fire-and-forget background race tasks
 _active_race_tasks: set[asyncio.Task[None]] = set()
+
+
+def compute_payment_request_hash(
+    payment_in: PaymentCreate | PaymentRaceCreate,
+) -> str:
+    """
+    Compute canonical SHA-256 hash of payment request parameters to prevent
+    idempotency key reuse with different parameters.
+    Normalizes numeric amounts (e.g. 100 vs 100.00) and sorts canonical metadata.
+    """
+    amount_str = f"{Decimal(str(payment_in.amount)).quantize(Decimal('0.01')):.2f}"
+    currency = payment_in.currency.upper()
+    scenario_id = getattr(payment_in, "scenario_id", "") or ""
+    client_user_id = str(payment_in.client_user_id)
+
+    meta = getattr(payment_in, "meta", None) or {}
+    canonical_meta = {
+        str(k): meta[k]
+        for k in sorted(meta.keys())
+        if k
+        in (
+            "recipient",
+            "bot_username",
+            "rate",
+            "stars_count",
+            "order_id",
+            "source",
+        )
+    }
+    meta_json = json.dumps(canonical_meta, sort_keys=True, default=str)
+
+    raw_data = f"{client_user_id}|{scenario_id}|{amount_str}|{currency}|{meta_json}"
+    return hashlib.sha256(raw_data.encode()).hexdigest()
 
 
 async def get_active_payment_for_user(
@@ -136,7 +170,7 @@ async def create_payment(
     Once the payment link is obtained, the account lock is released and the account
     is immediately re-warmed in the background for the next customer.
     If the same user creates a new payment, cancels their previous payment.
-    Enforces atomic idempotency via Redis pre-registration locks.
+    Enforces DB-level and Redis pre-registration for strict idempotency.
     """
     t_start = time.perf_counter()
     now = datetime.now(UTC)
@@ -146,14 +180,14 @@ async def create_payment(
     # 0. Check idempotency if idempotency_key is provided
     idem_acquired = False
     idem_key: str | None = None
+    idem_owner_token: str | None = None
     payload_hash: str | None = None
+    payment: Payment | None = None
 
     if payment_in.idempotency_key:
+        payload_hash = compute_payment_request_hash(payment_in)
         redis = get_redis_client()
-        payload_str = (
-            f"{payment_in.scenario_id}:{payment_in.amount}:{payment_in.currency}"
-        )
-        payload_hash = hashlib.sha256(payload_str.encode()).hexdigest()
+        idem_owner_token = str(uuid6.uuid7())
         idem_key = (
             f"idempotency:{payment_in.client_user_id}:{payment_in.idempotency_key}"
         )
@@ -165,18 +199,18 @@ async def create_payment(
         )
         existing_idem = (await session.exec(stmt)).first()
         if existing_idem:
-            if (
-                existing_idem.scenario_id == payment_in.scenario_id
-                and existing_idem.amount == payment_in.amount
-                and existing_idem.currency == payment_in.currency
-            ):
-                logger.info(
-                    "payment_returned_by_idempotency_key",
-                    payment_id=str(existing_idem.id),
-                    idempotency_key=payment_in.idempotency_key,
+            stored_hash = existing_idem.meta.get("request_hash")
+            is_same = (
+                stored_hash == payload_hash
+                if stored_hash
+                else (
+                    existing_idem.scenario_id == payment_in.scenario_id
+                    and Decimal(str(existing_idem.amount)).quantize(Decimal("0.01"))
+                    == Decimal(str(payment_in.amount)).quantize(Decimal("0.01"))
+                    and existing_idem.currency.upper() == payment_in.currency.upper()
                 )
-                return existing_idem
-            else:
+            )
+            if not is_same:
                 raise AppException(
                     message=(
                         "Idempotency-Key already used with "
@@ -185,11 +219,41 @@ async def create_payment(
                     code="IDEMPOTENCY_CONFLICT",
                     status_code=409,
                 )
+            if existing_idem.status == PaymentStatus.GENERATING:
+                raise AppException(
+                    message=(
+                        "A request with this idempotency key is already in progress."
+                    ),
+                    code="CONCURRENT_IDEMPOTENT_REQUEST",
+                    status_code=409,
+                )
+            if existing_idem.status == PaymentStatus.RECONCILIATION_REQUIRED:
+                raise AppException(
+                    message=(
+                        "Payment with this idempotency key "
+                        "requires manual reconciliation."
+                    ),
+                    code="RECONCILIATION_REQUIRED",
+                    status_code=409,
+                )
 
-        # 0b. Acquire distributed pre-registration key
+            logger.info(
+                "payment_returned_by_idempotency_key",
+                payment_id=str(existing_idem.id),
+                idempotency_key=payment_in.idempotency_key,
+            )
+            return existing_idem
+
+        # 0b. Acquire distributed pre-registration key in Redis
         acquired_lock = await redis.set(
             idem_key,
-            json.dumps({"status": "processing", "payload_hash": payload_hash}),
+            json.dumps(
+                {
+                    "owner": idem_owner_token,
+                    "status": "generating",
+                    "payload_hash": payload_hash,
+                }
+            ),
             nx=True,
             ex=120,
         )
@@ -217,7 +281,13 @@ async def create_payment(
             for _ in range(30):
                 await asyncio.sleep(0.5)
                 existing_idem = (await session.exec(stmt)).first()
-                if existing_idem:
+                if existing_idem and existing_idem.status in (
+                    PaymentStatus.PENDING,
+                    PaymentStatus.PAID,
+                    PaymentStatus.CANCELLED,
+                    PaymentStatus.EXPIRED,
+                    PaymentStatus.FAILED,
+                ):
                     return existing_idem
 
             raise AppException(
@@ -226,6 +296,46 @@ async def create_payment(
                 status_code=409,
             )
         idem_acquired = True
+
+        # 0c. DB-level pre-registration before external action
+        payment = Payment(
+            client_user_id=payment_in.client_user_id,
+            scenario_id=payment_in.scenario_id,
+            amount=payment_in.amount,
+            currency=payment_in.currency,
+            idempotency_key=payment_in.idempotency_key,
+            status=PaymentStatus.GENERATING,
+            expires_at=expires_at,
+            meta={"request_hash": payload_hash, **payment_in.meta},
+        )
+        try:
+            async with session.begin_nested():
+                session.add(payment)
+                await session.flush()
+        except IntegrityError as err:
+            existing_idem = (await session.exec(stmt)).first()
+            if existing_idem:
+                stored_hash = existing_idem.meta.get("request_hash")
+                if stored_hash and stored_hash != payload_hash:
+                    raise AppException(
+                        message=(
+                            "Idempotency-Key already used with "
+                            "different payment parameters."
+                        ),
+                        code="IDEMPOTENCY_CONFLICT",
+                        status_code=409,
+                    ) from err
+                if existing_idem.status == PaymentStatus.GENERATING:
+                    raise AppException(
+                        message=(
+                            "A request with this idempotency key "
+                            "is already in progress."
+                        ),
+                        code="CONCURRENT_IDEMPOTENT_REQUEST",
+                        status_code=409,
+                    ) from err
+                return existing_idem
+            raise
 
     try:
         # 1. Check if user already has an active pending payment
@@ -279,6 +389,7 @@ async def create_payment(
         lease = acquired_account.lease
         slot_lock_token: str | None = None
         generation_lock_released = False
+        result = None
 
         try:
             # If scenario requires exclusive pending slot, acquire it now
@@ -291,7 +402,7 @@ async def create_payment(
                         "All account slots for this provider are busy."
                     )
 
-            # 2. Execute scenario to generate payment link
+            # 2. Execute scenario to generate payment link with active lease renewal
             ctx = ScenarioContext(
                 client_user_id=payment_in.client_user_id,
                 amount=payment_in.amount,
@@ -299,7 +410,8 @@ async def create_payment(
                 account=account,
                 meta=payment_in.meta,
             )
-            result = await scenario.create_payment(ctx)
+            async with AccountLeaseRenewer(account.id, lease.owner_token):
+                result = await scenario.create_payment(ctx)
 
             # Release generation lock immediately after Telegram dialog finishes
             # (before external SBP resolution)
@@ -354,20 +466,28 @@ async def create_payment(
                 "stage_timings": all_stages,
                 "slot_lock_token": slot_lock_token,
             }
+            if payload_hash:
+                merged_meta["request_hash"] = payload_hash
 
-            # 4. Create new payment record
-            payment = Payment(
-                client_user_id=payment_in.client_user_id,
-                scenario_id=scenario.scenario_id,
-                amount=payment_in.amount,
-                currency=payment_in.currency,
-                idempotency_key=payment_in.idempotency_key,
-                account_id=account.id,
-                status=PaymentStatus.PENDING,
-                payment_link=resolved_link,
-                expires_at=expires_at,
-                meta=merged_meta,
-            )
+            # 4. Create or update payment record
+            if payment is not None:
+                payment.account_id = account.id
+                payment.status = PaymentStatus.PENDING
+                payment.payment_link = resolved_link
+                payment.meta = merged_meta
+            else:
+                payment = Payment(
+                    client_user_id=payment_in.client_user_id,
+                    scenario_id=scenario.scenario_id,
+                    amount=payment_in.amount,
+                    currency=payment_in.currency,
+                    idempotency_key=payment_in.idempotency_key,
+                    account_id=account.id,
+                    status=PaymentStatus.PENDING,
+                    payment_link=resolved_link,
+                    expires_at=expires_at,
+                    meta=merged_meta,
+                )
 
             account.updated_at = now
             session.add(account)
@@ -381,6 +501,14 @@ async def create_payment(
                     account.id,
                     owner_token=slot_lock_token,
                 )
+            if payment is not None:
+                if result is not None:
+                    payment.status = PaymentStatus.RECONCILIATION_REQUIRED
+                else:
+                    payment.status = PaymentStatus.FAILED
+                session.add(payment)
+                with contextlib.suppress(Exception):
+                    await session.flush()
             raise
         finally:
             if not generation_lock_released:
@@ -422,9 +550,26 @@ async def create_payment(
         return payment
 
     except Exception:
-        if idem_key and idem_acquired:
+        if idem_key and idem_acquired and idem_owner_token:
             redis = get_redis_client()
-            await redis.delete(idem_key)
+            if (
+                payment is not None
+                and payment.status == PaymentStatus.RECONCILIATION_REQUIRED
+            ):
+                await redis.set(
+                    idem_key,
+                    json.dumps(
+                        {
+                            "status": "reconciliation_required",
+                            "payload_hash": payload_hash,
+                        }
+                    ),
+                    ex=86400,
+                )
+            else:
+                from app.modules.payments.scenarios.state import _eval_release_lock
+
+                await _eval_release_lock(redis, idem_key, idem_owner_token)
         raise
 
 
@@ -471,6 +616,27 @@ PROTECTED_INTERNAL_META_KEYS = {
 }
 
 
+async def get_payment_for_update(
+    session: AsyncSession,
+    payment_id: UUID,
+) -> Payment:
+    """
+    Load payment under an exclusive row-level lock (FOR UPDATE), ensuring
+    the in-memory entity reflects latest database state via populate_existing.
+    Raises NotFoundException if row does not exist.
+    """
+    stmt = (
+        select(Payment)
+        .where(Payment.id == payment_id)
+        .with_for_update()
+        .execution_options(populate_existing=True)
+    )
+    payment = (await session.exec(stmt)).one_or_none()
+    if payment is None:
+        raise NotFoundException("Payment not found.")
+    return payment
+
+
 async def mark_payment_status(
     session: AsyncSession,
     db_payment: Payment,
@@ -485,8 +651,7 @@ async def mark_payment_status(
     - Protected internal meta fields cannot be overwritten by callback.
     Uses row-level locking to prevent concurrent state transitions.
     """
-    stmt = select(Payment).where(Payment.id == db_payment.id).with_for_update()
-    locked_payment = (await session.exec(stmt)).first() or db_payment
+    locked_payment = await get_payment_for_update(session, db_payment.id)
 
     now = datetime.now(UTC)
 
@@ -576,10 +741,10 @@ async def cancel_payment(
     Cancel a pending payment and immediately unlock its assigned account.
     If payment is already PAID, raises 409 conflict.
     If already CANCELLED, EXPIRED, or FAILED, returns idempotently.
-    Uses row-level locking to prevent concurrent state transitions.
+    Uses row-level locking with populate_existing to prevent concurrent
+    state transitions.
     """
-    stmt = select(Payment).where(Payment.id == db_payment.id).with_for_update()
-    locked_payment = (await session.exec(stmt)).first() or db_payment
+    locked_payment = await get_payment_for_update(session, db_payment.id)
 
     if locked_payment.status == PaymentStatus.PAID:
         raise AppException(
@@ -667,39 +832,37 @@ async def expire_overdue_payments(session: AsyncSession) -> int:
 async def release_all_locked_accounts(session: AsyncSession) -> tuple[int, int]:
     """
     Cancel all active PENDING payments to immediately free all reserved
-    Telegram accounts. Returns (cancelled_payments_count, released_accounts_count).
+    Telegram accounts using unified cancel_payment under row locks.
+    Returns (cancelled_payments_count, released_accounts_count).
     """
     now = datetime.now(UTC)
-    statement = select(Payment).where(
-        Payment.status == PaymentStatus.PENDING,
-        Payment.expires_at > now,
+    statement = (
+        select(Payment)
+        .where(
+            Payment.status == PaymentStatus.PENDING,
+            Payment.expires_at > now,
+        )
+        .with_for_update()
+        .execution_options(populate_existing=True)
     )
     result = await session.exec(statement)
-    active_pending = result.all()
+    active_pending = list(result.all())
 
     released_account_ids: set[UUID] = set()
+    cancelled_count = 0
     for payment in active_pending:
-        payment.status = PaymentStatus.CANCELLED
-        payment.cancelled_at = now
-        if payment.account_id:
-            released_account_ids.add(payment.account_id)
-        session.add(payment)
-
-    if active_pending:
-        await session.flush()
-
-    # Release lingering Redis generation, stars, and pending slot locks
-    cleared_redis_locks = await release_all_account_generation_locks()
-    await release_all_scenario_stars_reservations()
-    await release_all_scenario_pending_locks()
+        cancelled = await cancel_payment(session, payment)
+        if cancelled.status == PaymentStatus.CANCELLED:
+            cancelled_count += 1
+            if cancelled.account_id:
+                released_account_ids.add(cancelled.account_id)
 
     logger.info(
         "all_locked_accounts_released",
-        cancelled_payments=len(active_pending),
+        cancelled_payments=cancelled_count,
         released_accounts=len(released_account_ids),
-        cleared_redis_locks=cleared_redis_locks,
     )
-    return len(active_pending), max(len(released_account_ids), cleared_redis_locks)
+    return cancelled_count, len(released_account_ids)
 
 
 async def prepare_account_scenarios(
@@ -752,31 +915,34 @@ async def prepare_account_scenarios(
         results: dict[str, str] = {}
         all_ok = True
 
-        for scenario in scenario_registry.list():
-            if getattr(
-                scenario, "requires_exclusive_pending_slot", False
-            ) and await is_scenario_pending_locked(scenario.scenario_id, account.id):
-                results[scenario.scenario_id] = "skipped"
-                continue
-            try:
-                logger.info(
-                    "preparing_scenario_for_account",
-                    scenario_id=scenario.scenario_id,
-                    account_id=str(account.id),
-                )
-                res = await scenario.prepare(account=account, client=client)
-                results[scenario.scenario_id] = res.status
-                if res.status not in ("ok", "skipped"):
+        async with AccountLeaseRenewer(account.id, lock_token):
+            for scenario in scenario_registry.list():
+                if getattr(
+                    scenario, "requires_exclusive_pending_slot", False
+                ) and await is_scenario_pending_locked(
+                    scenario.scenario_id, account.id
+                ):
+                    results[scenario.scenario_id] = "skipped"
+                    continue
+                try:
+                    logger.info(
+                        "preparing_scenario_for_account",
+                        scenario_id=scenario.scenario_id,
+                        account_id=str(account.id),
+                    )
+                    res = await scenario.prepare(account=account, client=client)
+                    results[scenario.scenario_id] = res.status
+                    if res.status not in ("ok", "skipped"):
+                        all_ok = False
+                except Exception as exc:
+                    logger.error(
+                        "scenario_prepare_error",
+                        scenario_id=scenario.scenario_id,
+                        account_id=str(account.id),
+                        error=str(exc),
+                    )
+                    results[scenario.scenario_id] = f"error: {exc}"
                     all_ok = False
-            except Exception as exc:
-                logger.error(
-                    "scenario_prepare_error",
-                    scenario_id=scenario.scenario_id,
-                    account_id=str(account.id),
-                    error=str(exc),
-                )
-                results[scenario.scenario_id] = f"error: {exc}"
-                all_ok = False
 
         return {
             "status": "completed" if all_ok else "failed",
@@ -829,6 +995,18 @@ async def prepare_single_scenario(
             "reason": "Account is busy generating a payment",
         }
 
+    # Re-check pending slot AFTER acquiring generation lock to eliminate race window
+    if getattr(
+        scenario, "requires_exclusive_pending_slot", False
+    ) and await is_scenario_pending_locked(scenario.scenario_id, account.id):
+        await release_account_generation_lock(account.id, owner_token=lock_token)
+        return {
+            "status": "skipped",
+            "account_id": str(account.id),
+            "scenario_id": scenario_id,
+            "reason": "Account pending slot is currently locked",
+        }
+
     try:
         client = await telegram_session_pool.get_connected_client(account)
         logger.info(
@@ -836,7 +1014,8 @@ async def prepare_single_scenario(
             scenario_id=scenario_id,
             account_id=str(account.id),
         )
-        res = await scenario.prepare(account=account, client=client)
+        async with AccountLeaseRenewer(account.id, lock_token):
+            res = await scenario.prepare(account=account, client=client)
         return {
             "status": "completed" if res.status == "ok" else res.status,
             "account_id": str(account.id),
@@ -994,7 +1173,9 @@ async def _run_race_scenario_task(
             meta=race_in.meta,
         )
 
-        result = await scenario.create_payment(ctx)
+        result = None
+        async with AccountLeaseRenewer(account.id, lease.owner_token):
+            result = await scenario.create_payment(ctx)
 
         # Release generation lock immediately after Telegram dialog finishes
         # (before external SBP resolution)
@@ -1064,17 +1245,18 @@ async def _run_race_scenario_task(
             except Exception:
                 await task_session.rollback()
                 raise
-    except asyncio.CancelledError:
+    except (asyncio.CancelledError, Exception):
         if slot_lock_token:
             await release_scenario_pending_lock(
                 scenario_id, account.id, owner_token=slot_lock_token
             )
-        raise
-    except Exception:
-        if slot_lock_token:
-            await release_scenario_pending_lock(
-                scenario_id, account.id, owner_token=slot_lock_token
-            )
+        if result is not None:
+            stars_tok = result.meta.get("stars_reservation_token")
+            stars_cnt = result.meta.get("stars_count")
+            if stars_tok and stars_cnt:
+                await release_scenario_stars_reservation(
+                    scenario_id, int(stars_cnt), owner_token=str(stars_tok)
+                )
         raise
     finally:
         # Guarantee generation lock is released once link is obtained or upon error
@@ -1127,6 +1309,32 @@ async def start_payment_race(
     now = datetime.now(UTC)
     expires_at = now + timedelta(minutes=PAYMENT_TTL_MINUTES)
     batch_id: UUID = uuid6.uuid7()
+
+    # 0. Check idempotency for race if idempotency_key is provided
+    if race_in.idempotency_key:
+        redis = get_redis_client()
+        race_idem_key = (
+            f"idempotency:race:{race_in.client_user_id}:{race_in.idempotency_key}"
+        )
+        existing_batch = await redis.get(race_idem_key)
+        if existing_batch:
+            try:
+                batch_str = (
+                    existing_batch.decode("utf-8")
+                    if isinstance(existing_batch, bytes)
+                    else str(existing_batch)
+                )
+                batch_uuid = UUID(batch_str)
+                return PaymentRaceFireResponse(
+                    batch_id=batch_uuid,
+                    status="running",
+                    scenarios=(
+                        race_in.scenario_ids or ["starslly_bot", "helperstars_bot"]
+                    ),
+                )
+            except (ValueError, TypeError):
+                pass
+        await redis.set(race_idem_key, str(batch_id), ex=1800)
 
     # Resolve scenarios
     if race_in.scenario_ids:
@@ -1253,10 +1461,11 @@ async def _race_background_runner(
 
     succeeded = 0
     failed = 0
-    timed_out = False
-    cancelled = False
+    terminal_status = "done"
 
-    async def _cleanup() -> None:
+    async def _cleanup(
+        final_status: str, count_succeeded: int, count_failed: int
+    ) -> None:
         # Cancel all pending tasks and wait for them to finish cleanly
         pending = [t for t in tasks if not t.done()]
         for t in pending:
@@ -1271,21 +1480,13 @@ async def _race_background_runner(
             )
 
         total_duration = round(time.perf_counter() - race_start, 2)
-        cur_task = asyncio.current_task()
-        is_cancelling = (cur_task.cancelling() > 0) if cur_task is not None else False
-        if cancelled or is_cancelling:
-            terminal_status = "cancelled"
-        elif timed_out:
-            terminal_status = "timeout"
-        else:
-            terminal_status = "done"
         try:
             await race_buffer.finish_race(
                 batch_id,
-                status=terminal_status,
+                status=final_status,
                 total=len(pairs),
-                succeeded=succeeded,
-                failed=failed,
+                succeeded=count_succeeded,
+                failed=count_failed,
                 duration_sec=total_duration,
             )
         except Exception as exc:
@@ -1298,12 +1499,11 @@ async def _race_background_runner(
     try:
         async with asyncio.timeout(race_in.timeout_sec):
             for fut in asyncio.as_completed(tasks):
+                sse_event: str | None = None
                 try:
                     sse_event = await fut
                     succeeded += 1
-                    await race_buffer.push_race_event(batch_id, sse_event)
                 except asyncio.CancelledError:
-                    cancelled = True
                     raise
                 except Exception as exc:
                     failed += 1
@@ -1317,9 +1517,21 @@ async def _race_background_runner(
                         ensure_ascii=False,
                     )
                     err_event = f"event: error\ndata: {err_payload}\n\n"
-                    await race_buffer.push_race_event(batch_id, err_event)
+                    with contextlib.suppress(Exception):
+                        await race_buffer.push_race_event(batch_id, err_event)
+                    continue
+
+                if sse_event:
+                    try:
+                        await race_buffer.push_race_event(batch_id, sse_event)
+                    except Exception as exc:
+                        logger.error(
+                            "race_push_event_failed",
+                            batch_id=str(batch_id),
+                            error=str(exc),
+                        )
     except TimeoutError:
-        timed_out = True
+        terminal_status = "timeout"
         logger.warning(
             "race_timed_out",
             batch_id=str(batch_id),
@@ -1334,18 +1546,21 @@ async def _race_background_runner(
             ensure_ascii=False,
         )
         timeout_event = f"event: error\ndata: {timeout_payload}\n\n"
-        await race_buffer.push_race_event(batch_id, timeout_event)
+        with contextlib.suppress(Exception):
+            await race_buffer.push_race_event(batch_id, timeout_event)
     except asyncio.CancelledError:
-        cancelled = True
+        terminal_status = "cancelled"
         raise
     except Exception as exc:
+        terminal_status = "failed"
         logger.error(
             "race_background_runner_error",
             batch_id=str(batch_id),
             error=str(exc),
         )
+        raise
     finally:
-        await asyncio.shield(_cleanup())
+        await asyncio.shield(_cleanup(terminal_status, succeeded, failed))
 
 
 async def race_stream_generator(

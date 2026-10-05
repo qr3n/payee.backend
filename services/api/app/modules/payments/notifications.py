@@ -9,6 +9,7 @@ from dataclasses import dataclass
 from datetime import datetime, timedelta
 from uuid import UUID
 
+from sqlalchemy.exc import IntegrityError
 from sqlmodel import col, select
 from sqlmodel.ext.asyncio.session import AsyncSession
 
@@ -179,10 +180,15 @@ async def process_bot_notification(
 
     # 1. Idempotency check: ignore already processed Telegram message
     if message_id is not None:
-        existing_event_stmt = select(NotificationEvent).where(
-            NotificationEvent.account_id == account_id,
-            NotificationEvent.bot_username == norm_bot,
-            NotificationEvent.message_id == message_id,
+        existing_event_stmt = (
+            select(NotificationEvent)
+            .where(
+                NotificationEvent.account_id == account_id,
+                NotificationEvent.bot_username == norm_bot,
+                NotificationEvent.message_id == message_id,
+            )
+            .with_for_update()
+            .execution_options(populate_existing=True)
         )
         existing_event_res = await session.exec(existing_event_stmt)
         existing_event = existing_event_res.first()
@@ -195,7 +201,7 @@ async def process_bot_notification(
                     message_id=message_id,
                 )
                 return None
-            if existing_event.status == "ignored":
+            if existing_event.status in ("ignored", "processing"):
                 return None
             # If status == "unmatched", proceed to re-attempt matching
             # against active payments
@@ -216,10 +222,11 @@ async def process_bot_notification(
                 status="processing",
                 raw_text=message_text,
             )
-            session.add(active_event)
             try:
-                await session.flush()
-            except Exception:
+                async with session.begin_nested():
+                    session.add(active_event)
+                    await session.flush()
+            except IntegrityError:
                 logger.warning(
                     "concurrent_bot_notification_already_registered",
                     account_id=str(account_id),

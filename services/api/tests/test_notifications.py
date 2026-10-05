@@ -7,10 +7,11 @@ from decimal import Decimal
 from unittest.mock import AsyncMock, patch
 
 import pytest
+from sqlmodel import select
 from sqlmodel.ext.asyncio.session import AsyncSession
 
 from app.modules.accounts.models import AccountStatus, TelegramAccount
-from app.modules.payments.models import Payment, PaymentStatus
+from app.modules.payments.models import NotificationEvent, Payment, PaymentStatus
 from app.modules.payments.notifications import (
     parse_bot_payment_message,
     parse_helperstars_message,
@@ -548,3 +549,65 @@ async def test_unmatched_notification_re_matched_when_payment_arrives(
     await db_session.refresh(event)
     assert event.status == "processed"
     assert event.payment_id == payment.id
+
+
+@pytest.mark.asyncio
+async def test_notification_event_conflict_preserves_session(
+    db_session: AsyncSession,
+) -> None:
+    """
+    Criterion 6:
+    Verify that an IntegrityError during notification event insertion is
+    trapped inside a savepoint (begin_nested), so that the session is not left
+    in an aborted state and subsequent session operations can proceed cleanly.
+    """
+    sample_account = await _create_test_account(db_session, "Account Conflict")
+    now = datetime.now(UTC)
+    text = "⭐️ 50 Telegram Stars отправлены на @qr3nnn!\n📝 Заказ №001912"
+
+    # Insert an existing event manually to trigger IntegrityError on concurrent insert
+    dup_event = NotificationEvent(
+        account_id=sample_account.id,
+        bot_username="starshoppik_bot",
+        message_id=777888,
+        message_date=now,
+        status="processing",
+        raw_text="duplicate",
+    )
+    db_session.add(dup_event)
+    await db_session.flush()
+
+    # Now attempt to process the exact same message_id via process_bot_notification
+    # where existing_event is None in memory (simulating concurrent insert race)
+    with patch(
+        "app.modules.payments.notifications.select",
+        side_effect=lambda model: (
+            select(model).where(False)  # pretend not found on lookup
+            if model is NotificationEvent
+            else select(model)
+        ),
+    ):
+        res = await process_bot_notification(
+            session=db_session,
+            account_id=sample_account.id,
+            sender_username="StarShoppik_bot",
+            message_text=text,
+            message_id=777888,
+            message_date=now,
+        )
+        assert res is None
+
+    # Crucial assertion: the session must NOT be in a broken/failed state.
+    # We should be able to execute queries and flush cleanly!
+    check_payment = Payment(
+        client_user_id="user_check_session",
+        scenario_id="starshoppik_bot",
+        amount=Decimal("10.00"),
+        account_id=sample_account.id,
+        status=PaymentStatus.PENDING,
+        expires_at=now + timedelta(minutes=15),
+    )
+    db_session.add(check_payment)
+    await db_session.flush()
+    await db_session.refresh(check_payment)
+    assert check_payment.id is not None

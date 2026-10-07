@@ -1,3 +1,9 @@
+x-logging: &default-logging
+  driver: "json-file"
+  options:
+    max-size: "50m"
+    max-file: "3"
+
 services:
   traefik:
     image: traefik:v3.7
@@ -20,6 +26,7 @@ services:
     networks:
       - gateway
     restart: always
+    logging: *default-logging
 
   postgres:
     image: postgres:17-alpine
@@ -38,6 +45,7 @@ services:
     networks:
       - gateway
     restart: always
+    logging: *default-logging
 
   redis:
     image: redis:7-alpine
@@ -53,6 +61,7 @@ services:
     networks:
       - gateway
     restart: always
+    logging: *default-logging
 
   migration:
     build:
@@ -79,6 +88,7 @@ services:
     networks:
       - gateway
     restart: "no"
+    logging: *default-logging
 
   api:
     build:
@@ -126,6 +136,7 @@ services:
     networks:
       - gateway
     restart: always
+    logging: *default-logging
 
   worker:
     build:
@@ -159,6 +170,7 @@ services:
     networks:
       - gateway
     restart: always
+    logging: *default-logging
 
   bot:
     build:
@@ -199,6 +211,8 @@ services:
     networks:
       - gateway
     restart: always
+    logging: *default-logging
+
 
 volumes:
   traefik_acme:

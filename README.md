@@ -1,428 +1,313 @@
-# FastAPI Backend Template
+# 💳 Payee — Telegram Payment Orchestrator & Gateway
 
-Современный production-ready шаблон backend-микросервиса на базе **FastAPI**, ориентированный на максимальную производительность, микросервисную архитектуру и контейнеризацию.
-
-## 🚀 Стек технологий
-
-- **Фреймворк:** [FastAPI](https://fastapi.tiangolo.com/) (с нативной сериализацией Pydantic v2 в Rust)
-- **HTTP-сервер:** [Granian](https://github.com/emmett-framework/granian) — высокопроизводительный HTTP-сервер для Python, написанный на Rust
-- **Event Loop:** [uvloop](https://github.com/MagicStack/uvloop) — быстрый асинхронный цикл событий на базе libuv
-- **База данных:** [PostgreSQL 17](https://www.postgresql.org/) (с healthcheck и персистентными томами)
-- **ORM:** [SQLModel](https://sqlmodel.tiangolo.com/) (SQLAlchemy 2.0 + Pydantic v2) с асинхронным драйвером [asyncpg](https://github.com/MagicStack/asyncpg)
-- **Кэш & In-memory хранилище:** [Redis 7](https://redis.io/) с официальным клиентом `redis.asyncio`, C-парсером [hiredis](https://github.com/redis/hiredis-py) и встроенным Connection Pool
-- **Миграции БД:** [Alembic](https://alembic.sqlalchemy.org/) (асинхронная автогенерация миграций)
-- **Валидация и конфиг:** [Pydantic v2](https://docs.pydantic.dev/) & [pydantic-settings](https://docs.pydantic.dev/latest/concepts/pydantic_settings/)
-- **Telegram Bot:** [aiogram 3](https://docs.aiogram.dev/) & [aiogram-dialog](https://aiogram-dialog.readthedocs.io/) — современный декларативный бот-фронтенд (BFF-паттерн, FSM в Redis, Polling в Dev, Webhook через Traefik в Prod)
-- **Управление зависимостями:** [uv](https://docs.astral.sh/uv/) — сверхбыстрый пакетный менеджер нового поколения на Rust (заменяет Poetry/pip)
-- **Качество кода и тесты:** [pytest](https://docs.pytest.org/), [httpx](https://www.python-httpx.org/), [fakeredis](https://github.com/cunla/fakeredis-py), [Ruff](https://docs.astral.sh/ruff/) (линтер и форматтер), [Mypy](https://mypy-lang.org/)
-- **Контейнеризация:** Docker (Multi-stage build с кэшированием uv) & Docker Compose (dev и prod профили)
-- **CI/CD:** [GitHub Actions](https://github.com/features/actions) & [GitLab CI/CD](https://docs.gitlab.com/ee/ci/) (линтеры, Mypy, тесты, валидация Docker сборок)
+Высокопроизводительный асинхронный платёжный шлюз и оркестратор сценариев оплаты через Telegram MTProto (Starslly, HelperStars, StarShoppik) с автоматической генерацией платёжных ссылок, конвертацией в СБП (НСПК), реактивным подтверждением оплаты и исходящими вебхуками для мерчантов.
 
 ---
 
-## 📁 Структура проекта
+## ⚡ Ключевые возможности
 
-Структура следует принципам **микросервисной архитектуры** и **Separation of Concerns (SoC)**: все микросервисы располагаются в директории `services/`, каждый сервис изолирован, имеет собственный `pyproject.toml`, зависимости `uv.lock` и `Dockerfile`. В корне проекта находятся конфигурации оркестрации (`docker-compose.yml`, `docker-compose.prod.yml`).
+- 🚀 **Мультисценарная генерация ссылок («Race»):** Одновременный параллельный запуск сценариев оплаты через разные Telegram-боты с моментальной доставкой первой готовой ссылки клиенту через Server-Sent Events (SSE).
+- 🔗 **Автоматическое извлечение СБП (НСПК):** Автоматический резолвинг и нормализация банковских ссылок СБП из веб-эквайрингов (Cardlink, Antilopay).
+- 🤖 **Реактивный MTProto Listener:** Автоматический перехват входящих сообщений об оплате от ботов (@StarShoppik_bot, @HelperStars_Robot, @starslly_bot) в реальном времени с переводом платежа в статус `PAID`.
+- 📬 **Исходящие вебхуки (Outbound Callbacks):** Моментальная отправка HTTP POST уведомлений на `callback_url` мерчанта при подтверждении оплаты (с криптографической подписью HMAC-SHA256 и настраиваемыми ретраями).
+- 🛡️ **Финансовая безопасность и строгая идемпотентность:** Предварительная регистрация операций в БД, двухуровневые распределённые блокировки в Redis, изолированные транзакции финализации и автоматический статус `RECONCILIATION_REQUIRED` при нестандартных сбоях.
+- 📱 **Telegram Bot Management BFF:** Полнофункциональный бот-клиент для администраторов на базе `aiogram 3` и `aiogram-dialog` для мониторинга аккаунтов, проверки сессий и управления платежами.
+- 🐳 **Production-Ready контейнеризация:** Готовый стек с Traefik v3 (автоматический Let's Encrypt SSL), PostgreSQL 17, Redis 7, Taskiq асинхронными воркерами и Granian (Rust ASGI сервер).
+
+---
+
+## 🏗️ Архитектура системы
+
+Проект построен по принципам **Vertical Slice Architecture (VSA / Modular Monolith)** и **BFF (Backend for Frontend)**:
 
 ```text
-fastapi-backend-template/
-├── Makefile                    # Удобные шорткаты для разработки, тестов, миграций и Docker
-├── .github/
-│   └── workflows/
-│       └── ci.yml              # CI пайплайн для GitHub Actions
-├── .gitlab-ci.yml              # CI пайплайн для GitLab CI/CD
-├── docker-compose.yml          # Оркестрация для разработки (hot-reload, volume mount)
-├── docker-compose.prod.yml     # Оркестрация для production (multi-worker, no root, restart: always)
-├── .env.example                # Пример переменных окружения
-├── .gitignore                  # Исключения версионного контроля
-├── README.md                   # Документация проекта
-├── AGENTS.md                   # Правила архитектуры для ИИ-агентов
+payee/
 ├── infra/
-│   └── traefik/                # Edge Reverse Proxy (Traefik v3)
-│       ├── traefik.yml         # Конфигурация для локальной разработки (порт 80, дашборд 8080)
-│       ├── traefik.prod.yml    # Конфигурация для production (HTTPS / Let's Encrypt ACME)
-│       └── dynamic/
-│           └── middlewares.yml # Динамические middleware (security headers, gzip compression)
-└── services/
-    └── api/                    # Микросервис API (FastAPI)
-        ├── Dockerfile          # Многоэтапный Dockerfile (base -> builder -> dev / prod с uv)
-        ├── .dockerignore       # Исключения для сборки контейнера
-        ├── pyproject.toml      # Зависимости и конфигурация сервиса (uv / PEP 621)
-        ├── uv.lock             # Зафиксированные версии пакетов (uv)
-        ├── alembic.ini         # Конфигурация миграций Alembic
-        ├── alembic/            # Директория миграций базы данных
-        │   ├── env.py          # Асинхронный запуск миграций (SQLModel metadata)
-        │   └── versions/       # Файлы версий миграций
-        ├── tests/              # Набор тестов (pytest + httpx + SQLite in-memory)
-        │   ├── __init__.py
-        │   ├── conftest.py     # Фикстуры pytest (AsyncClient, in-memory DB & fake_redis)
-        │   ├── test_health.py  # Тесты эндпоинтов здоровья и readiness probe
-        │   ├── test_items.py   # Тесты CRUD операций над Items
-        │   ├── test_middleware_and_errors.py # Тесты Request-ID, ошибок и пагинации
-        │   └── test_redis.py   # Тесты операций Redis и CacheService
-        └── app/                # Исходный код приложения (Vertical Slice Architecture)
-            ├── __init__.py
-            ├── main.py         # Точка входа FastAPI, CORS, middleware, lifespan, /metrics
-            ├── core/           # Инфраструктура и кросс-функциональные компоненты
-            │   ├── __init__.py
-            │   ├── config.py   # Конфигурация через pydantic-settings & DSN
-            │   ├── db.py       # AsyncEngine и AsyncSessionMaker
-            │   ├── redis.py    # Redis ConnectionPool, клиент и хелперы
-            │   ├── broker.py   # Taskiq broker & correlation tracing middleware
-            │   ├── logging.py  # Структурированное логирование (structlog)
-            │   ├── middleware.py # RequestIDMiddleware (Correlation ID, latency, access logs)
-            │   ├── rate_limit.py # Redis sliding-window RateLimiter dependency
-            │   ├── exceptions.py # Базовые исключения (AppException, NotFound, RateLimit)
-            │   └── exception_handlers.py # Обработка ошибок (RFC 9457 Problem Details)
-            ├── shared/         # Общие примитивы и переиспользуемые строительные блоки
-            │   ├── __init__.py
-            │   ├── models.py   # BaseUUIDModel (UUIDv7, UTC timestamps)
-            │   ├── pagination.py # Generic-схемы PaginatedResponse[T], CursorParams
-            │   ├── errors.py   # Схемы ErrorDetail и ErrorResponse (RFC 9457)
-            │   └── cache.py    # Сервис кэширования через Redis с orjson (CacheService)
-            ├── modules/        # Вертикальные слайсы (Feature / Domain Modules)
-            │   ├── __init__.py # Реестр доменных моделей (для автогенерации Alembic)
-            │   ├── health/     # Срез мониторинга здоровья и readiness probe
-            │   │   ├── __init__.py
-            │   │   ├── router.py # /health и /ready
-            │   │   └── schemas.py # HealthCheckResponse, ReadinessResponse
-            │   ├── items/      # Доменный срез сущности Items
-            │   │   ├── __init__.py
-            │   │   ├── router.py  # Эндпоинты FastAPI (/api/v1/items/)
-            │   │   ├── models.py  # SQLModel сущности БД
-            │   │   ├── schemas.py # Pydantic DTO (ItemCreate, ItemUpdate, ItemRead)
-            │   │   ├── service.py # Бизнес-логика (Unit of Work, session.flush)
-            │   │   └── tasks.py   # Асинхронные задачи Taskiq
-            └── api/
-                ├── __init__.py
-                ├── deps.py     # FastAPI Depends провайдеры (get_db, get_redis)
-                └── v1/
-                    ├── __init__.py
-                    └── router.py # Агрегатор роутеров доменных модулей
-    └── bot/                    # 🤖 Микросервис Telegram-бота (aiogram 3 + aiogram-dialog)
-        ├── Dockerfile          # Многоэтапный Dockerfile (base -> builder -> dev / prod с uv)
-        ├── .dockerignore       # Исключения для сборки контейнера
-        ├── pyproject.toml      # Зависимости и конфигурация сервиса (uv / PEP 621)
-        ├── uv.lock             # Зафиксированные версии пакетов (uv)
-        ├── scripts/
-        │   └── entrypoint.sh   # Скрипт точки входа контейнера
-        ├── tests/              # Набор тестов (pytest + mock client + fakedialogs)
-        │   ├── __init__.py
-        │   ├── conftest.py     # Фикстуры
-        │   ├── test_client.py  # Тесты типизированного HTTP-клиента к API
-        │   ├── test_dialogs.py # Тесты геттеров и стейтов aiogram-dialog
-        │   ├── test_handlers.py# Тесты команд (/start, /menu, /help)
-        │   └── test_webhook.py # Тесты вебхук-сервера и healthcheck
-        └── bot/                # Исходный код бота
-            ├── __init__.py
-            ├── main.py         # Единая точка входа (Polling в Dev / Webhook в Prod)
-            ├── core/           # Конфигурация (pydantic-settings), логирование, RedisStorage
-            ├── client/         # Асинхронный HTTP-клиент (httpx) к FastAPI
-            ├── dialogs/        # Интерактивные меню и формы aiogram-dialog (Items)
-            ├── handlers/       # Обработчики команд Telegram
-            ├── middlewares/    # Внедрение ApiClientMiddleware и LoggingMiddleware
-            └── webhook/        # Webhook-сервер aiohttp для production
+│   └── traefik/                # Edge Reverse Proxy (TLS termination, Let's Encrypt, Rate Limiting)
+├── services/
+│   ├── api/                    # Основной бэкенд шлюза (FastAPI + SQLModel + Taskiq + Telethon)
+│   │   ├── app/
+│   │   │   ├── core/           # Конфигурация, БД, Redis, брокер Taskiq, логирование, лимиты
+│   │   │   ├── shared/         # BaseUUIDModel (UUIDv7), пагинация, RFC 9457 ошибки, кэш
+│   │   │   └── modules/        # Вертикальные слайсы (бизнес-домены):
+│   │   │       ├── health/     # Healthchecks & Readiness probes (/health, /ready)
+│   │   │       ├── accounts/   # Управление и мониторинг пула Telegram MTProto аккаунтов
+│   │   │       └── payments/   # Платёжные сценарии, гонка ссылок, резолверы СБП, вебхуки
+│   │   └── alembic/            # Асинхронные миграции PostgreSQL
+│   └── bot/                    # Telegram-бот администрирования (aiogram 3 + aiogram-dialog)
+├── docker-compose.prod.yml     # Продакшн-оркестрация (Traefik, Postgres, Redis, API, Worker, Bot)
+├── docker-compose.yml          # Окружение разработки (hot-reload, volume mounts)
+├── Makefile                    # Команды сборки, тестирования и форматирования
+└── .env.example                # Шаблон конфигурации переменных окружения
 ```
 
 ---
 
-## ⚡ Быстрые команды (Makefile)
+## 🚀 Пошаговое руководство по деплою на сервере
 
-В корне репозитория настроен `Makefile` для ускорения повседневной разработки:
+### 1. Требования к серверу
+- **ОС:** Ubuntu 22.04+ / Debian 12 / AlmaLinux 9.
+- **Установленное ПО:** Docker Engine 24+ и Docker Compose v2.
+- **Сеть:** Открытые входящие порты `80/TCP` и `443/TCP` (UFW / Security Groups).
+- **DNS:** Привязанные A-записи доменов к публичному IP сервера:
+  - `api.yourdomain.com` (для шлюза API).
+  - `bot.yourdomain.com` (для вебхука Telegram-бота).
 
-| Команда | Описание |
-|---|---|
-| `make help` | Справка по всем доступным командам |
-| `make dev` | Запуск локального сервера API Granian (`--reload`) |
-| `make worker` | Запуск фонового воркера Taskiq (`--reload`) |
-| `make bot-dev` | Запуск локального Telegram-бота в режиме polling |
-| `make test` | Запуск тестов для всех сервисов (`test-api` + `test-bot`) |
-| `make lint` | Проверка линтером Ruff и типами Mypy для всех сервисов |
-| `make format` | Форматирование кода и автоисправление во всех сервисах |
-| `make check` | Полная проверка качества кода (`lint` + `test`) для всех сервисов |
-| `make migrate` | Применение миграций базы данных (`alembic upgrade head`) |
-| `make migration m="msg"` | Создание новой автогенерируемой миграции Alembic |
-| `make downgrade` | Откат базы данных на 1 ревизию назад |
-| `make up` | Запуск всех сервисов в фоне через Docker Compose |
-| `make down` | Остановка всех контейнеров Docker Compose |
-| `make logs` | Просмотр логов всех сервисов в реальном времени |
-| `make build` | Пересборка Docker-контейнеров |
-| `make clean` | Очистка временных файлов кэша (`__pycache__`, `.pytest_cache`) |
-
----
-
-## 🛠️ Запуск через Docker Compose
-
-### 1. Локальная разработка (Traefik + API)
-
+### 2. Клонирование репозитория
 ```bash
-docker compose up --build
+git clone https://github.com/qr3n/payee.backend.git /opt/payee
+cd /opt/payee
 ```
 
-Благодаря **Traefik v3** трафик маршрутизируется по доменам (RFC 6761: `*.localhost` резолвятся локально автоматически без изменения `/etc/hosts`):
-
-| Сервис | URL | Описание |
-|---|---|---|
-| **Backend API (Docs)** | [http://api.localhost/docs](http://api.localhost/docs) | Swagger UI документация |
-| **Backend API (Health)** | [http://api.localhost/health](http://api.localhost/health) | Проверка здоровья API |
-| **Traefik Dashboard** | [http://localhost:8080](http://localhost:8080) | Дашборд роутера Traefik в реальном времени |
-| **API Direct Port** | [http://localhost:8000/docs](http://localhost:8000/docs) | Прямой доступ к API в обход прокси (для отладки) |
-
----
-
-## 🌐 Подключение внешнего фронтенда (Multi-repo)
-
-Фронтенд разрабатывается в отдельном репозитории и подключается к Traefik через общую Docker-сеть **`gateway`**.
-
-> [!TIP]
-> Полная документация по интеграции для фронтенд-разработчика или AI-агента, форматы контракта и примеры генерации TypeScript-типов описаны в файле [**`FRONTEND_INTEGRATION.md`**](file:///home/qr3n/PycharmProjects/fastapi-backend-template/FRONTEND_INTEGRATION.md).
-> Для экспорта машиночитаемой спецификации API используйте команду `make openapi` (создаёт [`openapi.json`](file:///home/qr3n/PycharmProjects/fastapi-backend-template/openapi.json)).
-
-### Вариант 1: Запуск фронтенда в Docker (из своего репозитория)
-В `docker-compose.yml` репозитория фронтенда достаточно указать сеть `gateway` как внешнюю:
-
-```yaml
-services:
-  frontend:
-    build: .
-    labels:
-      - "traefik.enable=true"
-      - "traefik.http.routers.frontend.rule=Host(`localhost`) || Host(`app.localhost`)"
-      - "traefik.http.routers.frontend.entrypoints=web"
-      - "traefik.http.services.frontend.loadbalancer.server.port=3000" # Порт вашего приложения
-    networks:
-      - gateway
-
-networks:
-  gateway:
-    external: true
+### 3. Настройка окружения (`.env`)
+Скопируйте пример конфигурации и задайте боевые секреты:
+```bash
+cp .env.example .env
+nano .env
 ```
 
-Traefik автоматически обнаружит запущенный контейнер фронтенда и направит на него запросы с `http://localhost` и `http://app.localhost`.
+**Обязательные переменные для Production:**
+```ini
+# Домены для маршрутизации Traefik и сертификатов
+API_HOST=api.yourdomain.com
+BOT_HOST=bot.yourdomain.com
+ACME_EMAIL=admin@yourdomain.com
 
-### Вариант 2: Локальная разработка без Docker (Vite / Next.js / Nuxt)
-Если фронтенд запускается локально командой `npm run dev` на порту 3000/5173, он отправляет запросы напрямую к API по адресу `http://api.localhost`. В бэкенде уже настроен CORS для `http://localhost` и `http://app.localhost`.
+# База данных PostgreSQL (ОБЯЗАТЕЛЬНО измените пароль!)
+POSTGRES_SERVER=postgres
+POSTGRES_USER=postgres
+POSTGRES_PASSWORD=your_super_strong_postgres_password_here
+POSTGRES_DB=payee_prod
 
-### 2. Запуск в режиме Production
+# Безопасность API
+ADMIN_API_KEY="your_random_admin_api_token"
+API_KEY="your_random_admin_api_token"
+ADMIN_CHAT_IDS="[123456789]"     # Telegram ID администраторов для оповещений
 
-```bash
-docker compose -f docker-compose.prod.yml up --build -d
+# Исходящие вебхуки мерчантам (HMAC-SHA256 подпись)
+PAYMENT_WEBHOOK_SECRET="your_webhook_signing_secret"
+
+# Telegram Bot (BFF)
+TELEGRAM_BOT_TOKEN="1234567890:AA...токен_от_BotFather"
+TELEGRAM_BOT_MODE=webhook
+TELEGRAM_WEBHOOK_URL="https://bot.yourdomain.com/webhook"
+TELEGRAM_WEBHOOK_SECRET="your_random_webhook_secret_token"
 ```
 
-- Traefik слушает порты 80 и 443, автоматически запрашивает бесплатные SSL-сертификаты **Let's Encrypt** через ACME HTTP-challenge.
-- Настроен автоматический редирект с HTTP на HTTPS.
-- Включены заголовки безопасности (HSTS, XSS Protection, Frame Options) и gzip-сжатие.
-- Приложение API запускается из-под непривилегированного пользователя `appuser` (UID 10001).
-- Granian запущен в многопроцессном режиме (`--workers 4`).
-
----
-
-## 🤖 Микросервис Telegram-бота (`services/bot`)
-
-В проект интегрирован production-ready шаблон Telegram-бота на базе **aiogram 3** и **aiogram-dialog**.
-
-### 🏛️ Архитектурные принципы:
-1. **API как единый источник правды (Single Source of Truth, SSOT):**
-   - Бот **не обращается к базе данных PostgreSQL напрямую** и не дублирует доменные модели и миграции.
-   - Все операции с данными (получение списка элементов, просмотр деталей, создание новых записей, запуск аналитических задач Taskiq) бот выполняет через асинхронный типизированный HTTP-клиент (`bot.client.ApiClient` на базе `httpx`) к FastAPI бэкенду (`API_BASE_URL`).
-   - Это гарантирует, что бизнес-логика, валидация, аутентификация и аудит централизованы в одном месте.
-2. **Изоляция хранилища Redis:**
-   - **Для бота:** Redis используется **исключительно** для персистентности FSM-состояний и стеков окон диалогов (`RedisStorage` с изолированным индексом БД `REDIS_FSM_DB=1` и префиксом ключей `fsm:`).
-   - **Для API:** Бизнес-кэш (`CacheService`) и очереди сообщений Taskiq живут в `REDIS_DB=0`.
-3. **Два режима работы (Dev / Prod):**
-   - **Development (`TELEGRAM_BOT_MODE=polling`):** Бот работает через long-polling. Не требуется белый IP-адрес, валидный SSL-сертификат или туннелирование через ngrok. Запуск: `make bot-dev` или через Docker Compose (`docker compose up bot`).
-   - **Production (`TELEGRAM_BOT_MODE=webhook`):** Бот разворачивается как `aiohttp` веб-сервер за Traefik v3. Traefik обеспечивает SSL-терминацию (HTTPS Let's Encrypt), а запросы от Telegram защищены секретным токеном (`X-Telegram-Bot-Api-Secret-Token`). Сервис предоставляет эндпоинт `/health` для Docker/Traefik healthcheck.
-4. **Реактивные диалоги (aiogram-dialog):**
-   - Декларативное управление окнами интерфейса: каталог элементов с навигацией и постраничным скроллингом (`ScrollingGroup`), форма пошагового создания элемента (`TextInput`), карточка элемента и запуск фонового воркера Taskiq прямо из Telegram.
-
-### 🚀 Запуск бота:
+### 4. Запуск контейнеров
+Запустите сборку и старт сервисов:
 ```bash
-# 1. Задайте токен от @BotFather в .env
-TELEGRAM_BOT_TOKEN="1234567890:your_actual_token"
+docker compose -f docker-compose.prod.yml up -d --build
+```
 
-# 2. Локальный запуск в режиме Polling (с хот-релоадом API):
-make bot-dev
+### 5. Проверка статуса запуска
+Убедитесь, что все контейнеры запущены и healthy:
+```bash
+docker compose -f docker-compose.prod.yml ps
+```
 
-# 3. Или запуск всех сервисов в Docker (Dev):
-make up
+Проверьте логи применения миграций и старта API:
+```bash
+docker compose -f docker-compose.prod.yml logs migration
+docker compose -f docker-compose.prod.yml logs api
+```
+
+Проверьте readiness probe:
+```bash
+curl -f https://api.yourdomain.com/ready
+# Ожидаемый ответ: {"status":"ready","database":true,"redis":true,"timestamp":"..."}
 ```
 
 ---
 
-## 💻 Локальный запуск без Docker
+## 🔑 Первоначальная инициализация аккаунтов
 
-### Требования:
-- Python 3.12+
-- [uv](https://docs.astral.sh/uv/)
+На чистом сервере база данных пуста. Для того чтобы генерация платёжных ссылок работала, в системе должны быть зарегистрированы **активные рабочие Telegram MTProto аккаунты**.
 
+### Способ 1: Через Telegram-бота администратора
+1. Откройте вашего бота в Telegram и отправьте `/start`.
+2. Перейдите в раздел **«Управление аккаунтами»**.
+3. Нажмите **«Добавить аккаунт»** и следуйте инструкциям ввода номера телефона и кода подтверждения.
+
+### Способ 2: Загрузка сессий через Admin API
+Используйте эндпоинт `POST /api/v1/accounts/upload`:
 ```bash
-# Перейдите в папку сервиса
-cd services/api
-
-# Установите зависимости (создаст .venv за доли секунды)
-uv sync
-
-# Запустите Granian сервер
-uv run granian --interface asgi --loop uvloop --host 0.0.0.0 --port 8000 --reload app.main:app
+curl -X POST https://api.yourdomain.com/api/v1/accounts/upload \
+  -H "X-API-Key: your_random_admin_api_token" \
+  -F "file=@session_archive.zip"
 ```
 
-### Добавление новых зависимостей:
-```bash
-# В директории services/api:
-uv add httpx
-```
-
-### Тестирование и проверка качества кода:
-```bash
-# Запуск асинхронных тестов:
-uv run pytest
-
-# Проверка линтером и автоисправление:
-uv run ruff check --fix .
-uv run ruff format .
-
-# Проверка статической типизации:
-uv run mypy app tests
-```
-
-### 🗄️ Миграции базы данных (Alembic):
-```bash
-# Создание новой миграции на основе изменений моделей SQLModel:
-uv run alembic revision --autogenerate -m "create_users_table"
-
-# Применение миграций до актуальной версии:
-uv run alembic upgrade head
-
-# Откат последней миграции:
-uv run alembic downgrade -1
-```
+После добавления аккаунтов прогрев сценариев и фоновый мониторинг сессий запустятся автоматически.
 
 ---
 
-## 📦 REST API CRUD эндпоинты
+## 📖 Сценарий интеграции: «Создание → Оплата → Callback»
 
-В шаблоне реализован полный production-grade CRUD пример на базе **SQLModel** и асинхронного PostgreSQL:
+### 1. Создание платежа (Одиночный сценарий)
 
-| Метод | Путь | Описание |
-|---|---|---|
-| `POST` | `/api/v1/items/` | Создание нового объекта (возвращает `201 Created` с UUID) |
-| `GET` | `/api/v1/items/` | Постраничный список объектов (`?page=1&size=20`) -> `PaginatedResponse` |
-| `GET` | `/api/v1/items/{id}` | Получение объекта по UUID (`404` с `ErrorResponse` если не найден) |
-| `PATCH` | `/api/v1/items/{id}` | Частичное обновление полей объекта |
-| `DELETE` | `/api/v1/items/{id}` | Удаление объекта (`204 No Content`) |
+**Запрос:** `POST /api/v1/payments/`
+```bash
+curl -X POST https://api.yourdomain.com/api/v1/payments/ \
+  -H "X-API-Key: your_random_admin_api_token" \
+  -H "Content-Type: application/json" \
+  -d '{
+    "client_user_id": "merchant_user_1001",
+    "scenario_id": "helperstars_bot",
+    "amount": "300.00",
+    "currency": "RUB",
+    "idempotency_key": "order_uuid_9999",
+    "callback_url": "https://merchant.example.com/api/payment-callback",
+    "meta": {
+      "order_id": "INV-102938"
+    }
+  }'
+```
 
----
-
-## 🛡️ Correlation ID (`X-Request-ID`) и единый формат ошибок
-
-Каждый HTTP-запрос проходит через высокопроизводительный pure ASGI middleware [`RequestIDMiddleware`](file:///home/qr3n/PycharmProjects/fastapi-backend-template/services/api/app/core/middleware.py):
-- Читает входящий заголовок `X-Request-ID` от клиента / Traefik или генерирует новый UUIDv4.
-- Сохраняет его в асинхронный контекст `ContextVar` (функция `get_request_id()`) и добавляет в заголовки ответа.
-
-Все ошибки приложения (ошибки валидации Pydantic 422, HTTP-исключения, доменные `AppException` и непредвиденные 500) форматируются через единые централизованные обработчики:
-
+**Ответ (201 Created):**
 ```json
 {
-  "error": {
-    "code": "ITEM_NOT_FOUND",
-    "message": "Item not found",
-    "details": null,
-    "request_id": "c1a2b3c4-d5e6-4f7a-8b9c-0d1e2f3a4b5c"
+  "id": "0192e210-2b10-7e10-91ab-6d9b01234567",
+  "client_user_id": "merchant_user_1001",
+  "scenario_id": "helperstars_bot",
+  "amount": "300.00",
+  "currency": "RUB",
+  "status": "pending",
+  "payment_link": "https://qr.nspk.ru/...",
+  "callback_url": "https://merchant.example.com/api/payment-callback",
+  "expires_at": "2026-10-07T14:30:00Z",
+  "paid_at": null,
+  "cancelled_at": null,
+  "meta": {
+    "is_sbp_resolved": true,
+    "generation_time_sec": 3.42
   }
 }
 ```
 
 ---
 
-## 📄 Универсальная пагинация (Generic Pagination)
+### 2. Гонка сценариев («Race») со стримингом через SSE
 
-Для любых коллекций в шаблоне реализован дженерик-класс [`PaginatedResponse[T]`](file:///home/qr3n/PycharmProjects/fastapi-backend-template/services/api/app/schemas/pagination.py) и параметры [`PageParams`](file:///home/qr3n/PycharmProjects/fastapi-backend-template/services/api/app/schemas/pagination.py) (`page`, `size`):
+Для максимальной скорости генерации ссылок можно запустить параллельную гонку по всем активным сценариям:
 
-```json
-{
-  "items": [
-    {
-      "id": "c1a2b3c4-...",
-      "title": "Item 1",
-      "is_active": true,
-      "created_at": "2026-09-23T20:50:00Z",
-      "updated_at": "2026-09-23T20:50:00Z"
-    }
-  ],
-  "total": 42,
-  "page": 1,
-  "size": 20,
-  "pages": 3
-}
-```
-
----
-
-## 🩺 Эндпоинты Health & Readiness Check
-
-В шаблоне реализованы эндпоинты для мониторинга и оркестрации:
-
-1. **Root Liveness Probe:** `GET /health`
-   Быстрая проверка жизнеспособности процесса для балансировщиков нагрузки (Traefik, ALB, Kubernetes liveness probe).
-
-2. **API v1 Liveness Probe:** `GET /api/v1/health`
-   Версионированный эндпоинт проверки статуса приложения.
-
-3. **Readiness Probe:** `GET /api/v1/ready`
-   Глубокая проверка готовности сервиса к обработке трафика: выполняет пинг в **PostgreSQL** (`SELECT 1`) и **Redis** (`PING`).
-   - Возвращает `200 OK`, если база данных и Redis доступны.
-   - Возвращает `503 Service Unavailable`, если хотя бы один из сервисов недоступен.
-
-### Пример ответа `/api/v1/ready`:
-```json
-{
-  "status": "ready",
-  "database": true,
-  "redis": true,
-  "timestamp": "2026-09-23T20:28:00.000000Z"
-}
-```
-
----
-
-## ⚙️ Переменные окружения
-
-Скопируйте пример:
+**Запуск:** `POST /api/v1/payments/race`
 ```bash
-cp .env.example .env
+curl -X POST https://api.yourdomain.com/api/v1/payments/race \
+  -H "X-API-Key: your_random_admin_api_token" \
+  -H "Content-Type: application/json" \
+  -d '{
+    "client_user_id": "merchant_user_1001",
+    "amount": "300.00",
+    "currency": "RUB",
+    "idempotency_key": "race_order_123",
+    "callback_url": "https://merchant.example.com/api/payment-callback"
+  }'
 ```
 
-| Переменная | По умолчанию | Описание |
-|---|---|---|
-| `PROJECT_NAME` | `FastAPI Service` | Название сервиса |
-| `VERSION` | `0.1.0` | Версия сервиса |
-| `ENVIRONMENT` | `development` | Окружение (`development` / `production`) |
-| `DEBUG` | `true` | Включение отладки и OpenAPI Docs (`/docs`) |
-| `PORT` | `8000` | Внутренний порт приложения |
-| `HOST` | `0.0.0.0` | Адрес прослушивания |
-| `WORKERS` | `1` (dev) / `4` (prod) | Количество воркеров Granian |
-| `POSTGRES_SERVER` | `postgres` | Хост PostgreSQL сервера |
-| `POSTGRES_PORT` | `5432` | Порт PostgreSQL |
-| `POSTGRES_USER` | `postgres` | Пользователь базы данных |
-| `POSTGRES_PASSWORD` | `postgres` | Пароль базы данных |
-| `POSTGRES_DB` | `app` | Имя базы данных |
-| `DB_POOL_SIZE` | `10` | Размер пула постоянных соединений PostgreSQL |
-| `DB_MAX_OVERFLOW` | `20` | Максимальное число временных соединений сверх пула |
-| `REDIS_HOST` | `redis` | Хост сервера Redis |
-| `REDIS_PORT` | `6379` | Порт сервера Redis |
-| `REDIS_PASSWORD` | *(пусто)* | Пароль для доступа к Redis |
-| `REDIS_DB` | `0` | Номер базы данных Redis |
-| `REDIS_MAX_CONNECTIONS` | `20` | Максимальный размер пула соединений Redis |
-| `API_HOST` | `api.localhost` | Домен бэкенда для Traefik (в проде: `api.domain.com`) |
-| `FRONTEND_HOST` | `localhost` | Домен фронтенда для Traefik (в проде: `domain.com`) |
-| `TRAEFIK_DASHBOARD_PORT`| `8080` | Порт веб-интерфейса Traefik |
-| `ACME_EMAIL` | `admin@example.com` | Email для выпуска сертификатов Let's Encrypt |
-| `BACKEND_CORS_ORIGINS` | `["http://localhost", ...]` | Разрешенные источники CORS |
-| `TELEGRAM_BOT_TOKEN` | *(токен от @BotFather)* | Токен Telegram-бота |
-| `TELEGRAM_BOT_MODE` | `polling` (dev) / `webhook` (prod) | Режим работы Telegram-бота |
-| `TELEGRAM_WEBHOOK_URL` | `https://bot.domain.com/webhook` | URL вебхука для Telegram в production |
-| `TELEGRAM_WEBHOOK_SECRET` | *(случайная строка)* | Секретный токен для проверки вебхука |
-| `REDIS_FSM_DB` | `1` | Изолированная БД Redis для FSM и aiogram-dialog |
-| `API_BASE_URL` | `http://api:8000` | URL бэкенда для обращения из Telegram-бота |
+**Ответ:** Возвращает `batch_id`. Клиент подключается к стриму:
+```bash
+curl -N https://api.yourdomain.com/api/v1/payments/race/{batch_id}/stream
+```
+Первая готовая ссылка отдаётся клиенту мгновенно по мере генерации в фоне.
 
+---
 
+### 3. Исходящий Callback мерчанту (Webhook)
+
+Когда покупатель оплачивает счёт, бот присылает подтверждение. Шлюз перехватывает сообщение, переводит статус в `PAID` и отправляет HTTP POST запрос на ваш `callback_url`:
+
+**Заголовки запроса:**
+```http
+POST /api/payment-callback HTTP/1.1
+Host: merchant.example.com
+Content-Type: application/json
+User-Agent: Payee-Webhook/0.1.0
+X-Payee-Timestamp: 1791388800
+X-Payee-Signature: 8f4a13c9a633... (HMAC-SHA256)
+```
+
+**Тело запроса (JSON):**
+```json
+{
+  "event": "payment.status_changed",
+  "payment_id": "0192e210-2b10-7e10-91ab-6d9b01234567",
+  "client_user_id": "merchant_user_1001",
+  "scenario_id": "helperstars_bot",
+  "amount": "300.00",
+  "currency": "RUB",
+  "status": "paid",
+  "idempotency_key": "order_uuid_9999",
+  "batch_id": null,
+  "payment_link": "https://qr.nspk.ru/...",
+  "created_at": "2026-10-07T14:00:00Z",
+  "paid_at": "2026-10-07T14:02:15Z",
+  "cancelled_at": null,
+  "external_transaction_id": "232384",
+  "meta": {
+    "order_id": "232384"
+  }
+}
+```
+
+#### Проверка подписи на стороне мерчанта (Python пример):
+```python
+import hashlib, hmac
+
+def verify_payee_webhook(body_bytes: bytes, timestamp: str, signature: str, secret: str) -> bool:
+    expected = hmac.new(
+        secret.encode("utf-8"),
+        f"{timestamp}.{body_bytes.decode('utf-8')}".encode("utf-8"),
+        hashlib.sha256,
+    ).hexdigest()
+    return hmac.compare_digest(expected, signature)
+```
+
+---
+
+### 4. Ручной повтор вебхука (Resend)
+
+Если сервер мерчанта временно не отвечал:
+```bash
+curl -X POST https://api.yourdomain.com/api/v1/payments/{payment_id}/webhook/resend \
+  -H "X-API-Key: your_random_admin_api_token"
+```
+
+---
+
+## 🛠️ Эксплуатация и обслуживание
+
+### Регулярные бэкапы базы данных
+Создайте скрипт резервного копирования в `crontab`:
+```bash
+# Ежедневный бэкап в 03:00 ночи
+0 3 * * * docker compose -f /opt/payee/docker-compose.prod.yml exec -T postgres pg_dump -U postgres app | gzip > /opt/backups/payee_$(date +\%F).sql.gz
+```
+
+### Мониторинг и метрики
+- **Prometheus метрики:** `GET https://api.yourdomain.com/metrics`
+- **Readiness probe:** `GET https://api.yourdomain.com/ready`
+- **Liveness probe:** `GET https://api.yourdomain.com/health`
+
+### Локальная разработка и тестирование
+```bash
+# Запуск локального окружения
+make dev
+
+# Запуск тестов API и бота
+make test
+
+# Проверка стилей и линтеров
+make check
+
+# Применение миграций
+make migrate
+```
+
+---
+
+## 🔒 Безопасность в Production
+
+1. **База данных и Redis изолированы:** Порты `5432` и `6379` не проброшены во внешнюю сеть хоста (закрыты в сети `gateway`).
+2. **Непривилегированные пользователи:** Контейнеры запускаются под пользователем `appuser` (UID 10001).
+3. **Ротация логов:** Для всех контейнеров в `docker-compose.prod.yml` установлен лимит `max-size: 50m`, `max-file: 3` для предотвращения переполнения диска.
+4. **Rate Limiting:** Traefik настроен на ограничение аномальной частоты запросов к API.

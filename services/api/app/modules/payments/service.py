@@ -108,9 +108,11 @@ def compute_payment_request_hash(
 
     meta_json = json.dumps(canonical_meta, sort_keys=True, default=str)
 
+    callback_url = str(getattr(payment_in, "callback_url", "") or "")
+
     raw_data = (
         f"{client_user_id}|{scenario_id}|{scenario_ids_str}|"
-        f"{amount_str}|{currency}|{meta_json}"
+        f"{amount_str}|{currency}|{callback_url}|{meta_json}"
     )
     return hashlib.sha256(raw_data.encode()).hexdigest()
 
@@ -352,6 +354,7 @@ async def create_payment(
                 amount=payment_in.amount,
                 currency=payment_in.currency,
                 idempotency_key=payment_in.idempotency_key,
+                callback_url=payment_in.callback_url,
                 status=PaymentStatus.GENERATING,
                 expires_at=expires_at,
                 meta={
@@ -884,6 +887,18 @@ async def mark_payment_status(
     session.add(locked_payment)
     await session.flush()
     await session.refresh(locked_payment)
+
+    if locked_payment.callback_url and callback.status in (
+        PaymentStatus.PAID,
+        PaymentStatus.CANCELLED,
+        PaymentStatus.EXPIRED,
+        PaymentStatus.FAILED,
+    ):
+        with contextlib.suppress(Exception):
+            from app.modules.payments.tasks import dispatch_payment_webhook
+
+            await dispatch_payment_webhook(locked_payment.id)
+
     return locked_payment
 
 
@@ -946,6 +961,13 @@ async def cancel_payment(
     session.add(locked_payment)
     await session.flush()
     await session.refresh(locked_payment)
+
+    if locked_payment.callback_url:
+        with contextlib.suppress(Exception):
+            from app.modules.payments.tasks import dispatch_payment_webhook
+
+            await dispatch_payment_webhook(locked_payment.id)
+
     return locked_payment
 
 
@@ -984,6 +1006,11 @@ async def expire_overdue_payments(session: AsyncSession) -> int:
                 owner_token=str(slot_token),
             )
         session.add(payment)
+        if payment.callback_url:
+            with contextlib.suppress(Exception):
+                from app.modules.payments.tasks import dispatch_payment_webhook
+
+                await dispatch_payment_webhook(payment.id)
 
     if overdue:
         await session.flush()
@@ -1330,6 +1357,7 @@ async def _run_race_scenario_task(
                 currency=race_in.currency,
                 account_id=account.id,
                 batch_id=batch_id,
+                callback_url=race_in.callback_url,
                 status=PaymentStatus.GENERATING,
                 expires_at=expires_at,
                 meta={

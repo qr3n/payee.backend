@@ -130,3 +130,172 @@ async def test_prepare_account_scenarios_task_direct(
     ) as mock_kiq:
         await dispatch_account_scenarios_warmup(acc.id)
         mock_kiq.assert_awaited_once_with(account_id=acc.id)
+
+
+@pytest.mark.asyncio
+async def test_dispatch_payment_webhook_task_success(
+    db_session: AsyncSession,
+) -> None:
+    """Test successful webhook dispatch with HMAC signature and metadata update."""
+    import json
+
+    import httpx
+    from pydantic import SecretStr
+
+    from app.core.config import settings
+    from app.modules.payments.tasks import (
+        dispatch_payment_webhook,
+        dispatch_payment_webhook_task,
+    )
+
+    acc = await _create_test_account(db_session, "Webhook Test Acc")
+    payment = Payment(
+        client_user_id="user_wh_1",
+        scenario_id="mock_bot",
+        amount=Decimal("150.00"),
+        currency="RUB",
+        account_id=acc.id,
+        status=PaymentStatus.PAID,
+        callback_url="https://merchant.example.com/api/callback",
+        expires_at=datetime.now(UTC) + timedelta(minutes=30),
+        paid_at=datetime.now(UTC),
+        meta={"order_id": "ORD-999"},
+    )
+    db_session.add(payment)
+    await db_session.flush()
+
+    posted_content = None
+    posted_headers = None
+
+    async def mock_post(
+        url: str, content: str, headers: dict[str, str]
+    ) -> httpx.Response:
+        nonlocal posted_content, posted_headers
+        posted_content = json.loads(content)
+        posted_headers = headers
+        req = httpx.Request("POST", url)
+        return httpx.Response(200, request=req, text="OK")
+
+    with (
+        patch.object(settings, "PAYMENT_WEBHOOK_SECRET", SecretStr("test_secret_key")),
+        patch("httpx.AsyncClient.post", new=AsyncMock(side_effect=mock_post)),
+    ):
+        result = await dispatch_payment_webhook_task.original_func(
+            payment_id=payment.id,
+            db=db_session,
+        )
+
+    assert result["status"] == "delivered"
+    assert result["attempts"] == 1
+    assert result["status_code"] == 200
+
+    # Verify payload content
+    assert posted_content is not None
+    assert posted_content["payment_id"] == str(payment.id)
+    assert posted_content["status"] == "paid"
+    assert posted_content["amount"] == "150.00"
+    assert posted_content["client_user_id"] == "user_wh_1"
+    assert posted_content["external_transaction_id"] == "ORD-999"
+
+    # Verify signature headers
+    assert posted_headers is not None
+    assert "X-Payee-Signature" in posted_headers
+    assert "X-Payee-Timestamp" in posted_headers
+
+    # Verify metadata saved to payment
+    await db_session.refresh(payment)
+    assert payment.meta["webhook_delivery"]["delivered"] is True
+    assert payment.meta["webhook_delivery"]["attempts"] == 1
+
+    # Verify non-blocking helper
+    with patch.object(
+        dispatch_payment_webhook_task, "kiq", new_callable=AsyncMock
+    ) as mock_kiq:
+        await dispatch_payment_webhook(payment.id)
+        mock_kiq.assert_awaited_once_with(payment_id=payment.id)
+
+
+@pytest.mark.asyncio
+async def test_dispatch_payment_webhook_task_retry_failure(
+    db_session: AsyncSession,
+) -> None:
+    """Test webhook dispatch retries on 500 error and records failure."""
+    import httpx
+
+    from app.core.config import settings
+    from app.modules.payments.tasks import dispatch_payment_webhook_task
+
+    payment = Payment(
+        client_user_id="user_wh_fail",
+        scenario_id="mock_bot",
+        amount=Decimal("50.00"),
+        status=PaymentStatus.PAID,
+        callback_url="https://merchant.example.com/fail-callback",
+        expires_at=datetime.now(UTC) + timedelta(minutes=30),
+    )
+    db_session.add(payment)
+    await db_session.flush()
+
+    attempts_count = 0
+
+    async def mock_post_500(url: str, **_kwargs: object) -> httpx.Response:
+        nonlocal attempts_count
+        attempts_count += 1
+        req = httpx.Request("POST", url)
+        return httpx.Response(500, request=req, text="Internal Server Error")
+
+    with (
+        patch.object(settings, "PAYMENT_WEBHOOK_MAX_RETRIES", 2),
+        patch("httpx.AsyncClient.post", new=AsyncMock(side_effect=mock_post_500)),
+        patch("asyncio.sleep", new_callable=AsyncMock),
+    ):
+        result = await dispatch_payment_webhook_task.original_func(
+            payment_id=payment.id,
+            db=db_session,
+        )
+
+    assert result["status"] == "failed"
+    assert result["attempts"] == 2
+    assert result["status_code"] == 500
+    assert "HTTP 500" in result["error"]
+
+    await db_session.refresh(payment)
+    assert payment.meta["webhook_delivery"]["delivered"] is False
+    assert payment.meta["webhook_delivery"]["attempts"] == 2
+
+
+@pytest.mark.asyncio
+async def test_dispatch_payment_webhook_task_skipped_conditions(
+    db_session: AsyncSession,
+) -> None:
+    """Test webhook is skipped if no callback_url or non-existent payment."""
+    import uuid6
+
+    from app.modules.payments.tasks import dispatch_payment_webhook_task
+
+    # Non-existent payment
+    res_none = await dispatch_payment_webhook_task.original_func(
+        payment_id=uuid6.uuid7(),
+        db=db_session,
+    )
+    assert res_none["status"] == "skipped"
+    assert res_none["reason"] == "payment_not_found"
+
+    # Payment without callback_url
+    payment_no_url = Payment(
+        client_user_id="user_wh_none",
+        scenario_id="mock_bot",
+        amount=Decimal("20.00"),
+        status=PaymentStatus.PAID,
+        callback_url=None,
+        expires_at=datetime.now(UTC) + timedelta(minutes=30),
+    )
+    db_session.add(payment_no_url)
+    await db_session.flush()
+
+    res_no_url = await dispatch_payment_webhook_task.original_func(
+        payment_id=payment_no_url.id,
+        db=db_session,
+    )
+    assert res_no_url["status"] == "skipped"
+    assert res_no_url["reason"] == "no_callback_url"

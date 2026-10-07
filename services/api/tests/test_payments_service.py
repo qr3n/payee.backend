@@ -1408,3 +1408,40 @@ async def test_click_button_fast_cancels_and_awaits_child_task_on_timeout() -> N
     res = await click_button_fast(mock_client, button, wait_answer_timeout=0.05)
     assert res is None
     assert child_cancelled is True
+
+
+@pytest.mark.asyncio
+async def test_mark_payment_status_triggers_webhook_dispatch(
+    db_session: AsyncSession,
+) -> None:
+    """
+    Test that transitioning payment with callback_url to PAID
+    triggers dispatch_payment_webhook.
+    """
+    from unittest.mock import AsyncMock, patch
+
+    from app.modules.payments.schemas import PaymentCallback
+    from app.modules.payments.service import mark_payment_status
+
+    acc = await _create_test_account(db_session, "Webhook Hook Account")
+    payment = Payment(
+        client_user_id="user_hook",
+        scenario_id="mock_bot",
+        amount=Decimal("200.00"),
+        account_id=acc.id,
+        status=PaymentStatus.PENDING,
+        callback_url="https://merchant.example.com/paid-hook",
+        expires_at=datetime.now(UTC) + timedelta(minutes=30),
+    )
+    db_session.add(payment)
+    await db_session.flush()
+
+    patch_target = "app.modules.payments.tasks.dispatch_payment_webhook"
+    with patch(patch_target, new=AsyncMock()) as mock_dispatch:
+        updated = await mark_payment_status(
+            session=db_session,
+            db_payment=payment,
+            callback=PaymentCallback(status=PaymentStatus.PAID),
+        )
+        assert updated.status == PaymentStatus.PAID
+        mock_dispatch.assert_awaited_once_with(payment.id)

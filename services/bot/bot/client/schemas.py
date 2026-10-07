@@ -131,6 +131,7 @@ class PaymentRead(BaseModel):
     currency: str
     status: str
     payment_link: str | None = None
+    callback_url: str | None = None
     expires_at: datetime
     paid_at: datetime | None = None
     cancelled_at: datetime | None = None
@@ -147,6 +148,7 @@ class PaymentCreate(BaseModel):
     amount: Decimal
     currency: str = "RUB"
     idempotency_key: str | None = None
+    callback_url: str | None = None
     meta: dict[str, Any] = {}
 
 

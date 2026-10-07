@@ -50,6 +50,7 @@ class PaymentRead(SQLModel):
     currency: str = Field(description="Payment currency")
     status: PaymentStatus = Field(description="Current payment status")
     payment_link: str | None = Field(description="Generated payment/invoice URL")
+    callback_url: str | None = Field(default=None, description="Webhook callback URL")
     expires_at: datetime = Field(description="UTC expiration deadline")
     paid_at: datetime | None = Field(description="UTC payment completion timestamp")
     cancelled_at: datetime | None = Field(description="UTC cancellation timestamp")
@@ -136,6 +137,12 @@ class PaymentRaceCreate(BaseModel):
         description="Optional idempotency key to prevent duplicate race launches",
         examples=["race_idem_123"],
     )
+    callback_url: str | None = Field(
+        default=None,
+        max_length=512,
+        description="Optional webhook URL to notify on payment completion",
+        examples=["https://merchant.example.com/api/payment-callback"],
+    )
 
 
 class PaymentRaceEvent(BaseModel):
@@ -177,3 +184,48 @@ class ReleaseAccountsResponse(BaseModel):
         description="Number of distinct Telegram accounts unlocked"
     )
     message: str = Field(description="Status description")
+
+
+class PaymentWebhookPayload(BaseModel):
+    """Payload dispatched to merchant callback_url on terminal payment status."""
+
+    event: str = Field(
+        default="payment.status_changed",
+        description="Webhook event type",
+        examples=["payment.status_changed"],
+    )
+    payment_id: UUID = Field(description="Unique payment ID (UUIDv7)")
+    client_user_id: str = Field(description="Client/user identifier")
+    scenario_id: str = Field(description="Executed payment scenario ID")
+    amount: Decimal = Field(description="Transaction monetary amount")
+    currency: str = Field(description="Transaction currency code")
+    status: PaymentStatus = Field(description="Current payment status")
+    idempotency_key: str | None = Field(
+        default=None, description="Client idempotency key"
+    )
+    batch_id: UUID | None = Field(
+        default=None, description="Race batch ID if applicable"
+    )
+    payment_link: str | None = Field(default=None, description="Payment/invoice URL")
+    created_at: datetime = Field(description="Payment creation timestamp")
+    paid_at: datetime | None = Field(
+        default=None, description="Payment confirmation timestamp"
+    )
+    cancelled_at: datetime | None = Field(
+        default=None, description="Payment cancellation timestamp"
+    )
+    external_transaction_id: str | None = Field(
+        default=None, description="Provider/bot transaction or order ID"
+    )
+    meta: dict[str, Any] = Field(
+        default_factory=dict, description="Public metadata associated with the payment"
+    )
+
+
+class PaymentWebhookResendResponse(BaseModel):
+    """Result of manual webhook re-dispatch."""
+
+    payment_id: UUID = Field(description="Unique payment ID")
+    callback_url: str = Field(description="Target callback URL")
+    status: str = Field(description="Dispatch status (delivered, skipped, failed)")
+    message: str = Field(description="Detailed delivery status or error message")

@@ -70,6 +70,17 @@ class PaymentBase(SQLModel):
         description="Optional client idempotency key to prevent duplicate charges",
         schema_extra={"examples": ["idem_abc123"]},
     )
+    callback_url: str | None = Field(
+        default=None,
+        sa_column=Column(String(512), nullable=True),
+        description=(
+            "Optional URL to dispatch HTTP POST webhook/callback "
+            "on terminal payment status"
+        ),
+        schema_extra={
+            "examples": ["https://merchant.example.com/api/payment-callback"]
+        },
+    )
 
 
 class Payment(PaymentBase, BaseUUIDModel, table=True):

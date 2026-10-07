@@ -91,6 +91,11 @@ class Settings(BaseSettings):
     ACCOUNT_CHECK_INTERVAL_SECONDS: int = 300
     ACCOUNT_CHECK_BACKGROUND_ENABLED: bool = True
 
+    # Outbound Payment Webhook Configuration
+    PAYMENT_WEBHOOK_SECRET: SecretStr | None = None
+    PAYMENT_WEBHOOK_TIMEOUT_SECONDS: float = 10.0
+    PAYMENT_WEBHOOK_MAX_RETRIES: int = 3
+
     @property
     def redis_uri(self) -> str:
         """Constructs an async Redis connection string."""

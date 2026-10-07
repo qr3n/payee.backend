@@ -10,6 +10,8 @@ from app.modules.payments.schemas import (
     PaymentCallback,
     PaymentCreate,
     PaymentRead,
+    PaymentWebhookPayload,
+    PaymentWebhookResendResponse,
     ScenarioRead,
 )
 
@@ -19,6 +21,8 @@ __all__ = [
     "PaymentCreate",
     "PaymentRead",
     "PaymentStatus",
+    "PaymentWebhookPayload",
+    "PaymentWebhookResendResponse",
     "ScenarioRead",
     "router",
 ]

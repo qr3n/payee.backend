@@ -68,6 +68,7 @@ services:
       context: ./services/api
       dockerfile: Dockerfile
       target: production
+      network: host
     image: fastapi-template-api:prod
     container_name: fastapi_migration_prod
     command: ["alembic", "upgrade", "head"]
@@ -95,6 +96,7 @@ services:
       context: ./services/api
       dockerfile: Dockerfile
       target: production
+      network: host
     image: fastapi-template-api:prod
     container_name: fastapi_api_prod
     depends_on:
@@ -143,6 +145,7 @@ services:
       context: ./services/api
       dockerfile: Dockerfile
       target: production
+      network: host
     image: fastapi-template-api:prod
     container_name: fastapi_worker_prod
     command: ["taskiq", "worker", "app.core.broker:broker", "--fs-discover", "--workers", "2"]
@@ -177,6 +180,7 @@ services:
       context: ./services/bot
       dockerfile: Dockerfile
       target: production
+      network: host
     image: fastapi-template-bot:prod
     container_name: fastapi_bot_prod
     depends_on:

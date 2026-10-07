@@ -9,7 +9,8 @@ COPY --from=ghcr.io/astral-sh/uv:latest /uv /uvx /bin/
 ENV PYTHONUNBUFFERED=1 \
     PYTHONDONTWRITEBYTECODE=1 \
     UV_COMPILE_BYTECODE=1 \
-    UV_LINK_MODE=copy
+    UV_LINK_MODE=copy \
+    UV_HTTP_TIMEOUT=120
 
 WORKDIR /app
 
@@ -20,9 +21,9 @@ FROM base AS builder
 
 COPY pyproject.toml uv.lock ./
 
-# Install project dependencies into /app/.venv using uv
+# Install only production dependencies into /app/.venv using uv
 RUN --mount=type=cache,target=/root/.cache/uv \
-    uv sync --frozen --no-install-project
+    uv sync --frozen --no-install-project --no-dev
 
 # ==============================================================================
 # Development stage: Live code reload with volume mounting

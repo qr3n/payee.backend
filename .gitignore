@@ -69,3 +69,6 @@ Thumbs.db
 *.session-journal
 *.session-wal
 *.session-shm
+
+# Review notes
+review*.md

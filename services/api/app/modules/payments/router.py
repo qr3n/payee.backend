@@ -19,6 +19,7 @@ from app.modules.payments.schemas import (
     PaymentRaceCreate,
     PaymentRaceFireResponse,
     PaymentRead,
+    PaymentWebhookResendResponse,
     ReleaseAccountsResponse,
     ScenarioRead,
 )
@@ -246,4 +247,56 @@ async def release_all_accounts_endpoint(
             f"Успешно освобождено аккаунтов: {released} "
             f"(отменено платежей: {cancelled})"
         ),
+    )
+
+
+@router.post(
+    "/{payment_id}/webhook/resend",
+    response_model=PaymentWebhookResendResponse,
+    summary="Manually re-dispatch payment status webhook to callback_url",
+    description=(
+        "Re-triggers webhook delivery for a payment to its configured callback_url. "
+        "Useful if the merchant service was temporarily down or missed previous "
+        "attempts."
+    ),
+)
+async def resend_payment_webhook(
+    payment_id: UUID,
+    db: AsyncSession = Depends(get_db),
+) -> PaymentWebhookResendResponse:
+    """Manually re-dispatch payment status webhook to its callback_url."""
+    from app.core.exceptions import AppException
+    from app.modules.payments.tasks import dispatch_payment_webhook_task
+
+    payment = await payment_service.get_payment(session=db, payment_id=payment_id)
+    if not payment:
+        raise NotFoundException(f"Payment with ID '{payment_id}' not found.")
+
+    if not payment.callback_url:
+        raise AppException(
+            message="Payment does not have a configured callback_url.",
+            code="NO_CALLBACK_URL",
+            status_code=400,
+        )
+
+    res = await dispatch_payment_webhook_task.original_func(
+        payment_id=payment.id,
+        db=db,
+    )
+    status_str = res.get("status", "failed")
+    attempts = res.get("attempts", 1)
+    status_code = res.get("status_code")
+    error = res.get("error")
+
+    message = (
+        f"Delivered in {attempts} attempt(s) (HTTP {status_code})"
+        if status_str == "delivered"
+        else f"Failed after {attempts} attempt(s): {error or 'Unknown error'}"
+    )
+
+    return PaymentWebhookResendResponse(
+        payment_id=payment.id,
+        callback_url=payment.callback_url,
+        status=status_str,
+        message=message,
     )

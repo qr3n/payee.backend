@@ -244,3 +244,95 @@ async def test_release_all_accounts_api(
     data = rel_resp.json()
     assert data["cancelled_payments_count"] >= 1
     assert data["released_accounts_count"] >= 1
+
+
+@pytest.mark.asyncio
+async def test_create_payment_with_callback_url_api(
+    client: AsyncClient, db_session: AsyncSession
+) -> None:
+    """Test POST /api/v1/payments/ accepts and persists callback_url."""
+    await _create_test_account(db_session, "Callback API Acc")
+
+    target_url = "https://merchant.example.com/api/callback"
+    resp = await client.post(
+        "/api/v1/payments/",
+        json={
+            "client_user_id": "test_wh_api_user",
+            "scenario_id": "mock_bot",
+            "amount": "120.00",
+            "callback_url": target_url,
+        },
+    )
+    assert resp.status_code == 201
+    data = resp.json()
+    assert data["callback_url"] == target_url
+
+    # Verify GET also returns callback_url
+    get_resp = await client.get(f"/api/v1/payments/{data['id']}")
+    assert get_resp.status_code == 200
+    assert get_resp.json()["callback_url"] == target_url
+
+
+@pytest.mark.asyncio
+async def test_resend_payment_webhook_api(
+    client: AsyncClient, db_session: AsyncSession
+) -> None:
+    """Test POST /api/v1/payments/{id}/webhook/resend manually triggers delivery."""
+    from unittest.mock import AsyncMock, patch
+
+    await _create_test_account(db_session, "Resend API Acc")
+
+    target_url = "https://merchant.example.com/api/callback"
+    p_resp = await client.post(
+        "/api/v1/payments/",
+        json={
+            "client_user_id": "test_resend_user",
+            "scenario_id": "mock_bot",
+            "amount": "130.00",
+            "callback_url": target_url,
+        },
+    )
+    assert p_resp.status_code == 201
+    payment_id = p_resp.json()["id"]
+
+    mock_res = {
+        "status": "delivered",
+        "attempts": 1,
+        "status_code": 200,
+        "error": None,
+    }
+    with patch(
+        "app.modules.payments.tasks.dispatch_payment_webhook_task.original_func",
+        new=AsyncMock(return_value=mock_res),
+    ):
+        resend_resp = await client.post(f"/api/v1/payments/{payment_id}/webhook/resend")
+        assert resend_resp.status_code == 200
+        data = resend_resp.json()
+        assert data["payment_id"] == payment_id
+        assert data["callback_url"] == target_url
+        assert data["status"] == "delivered"
+        assert "HTTP 200" in data["message"]
+
+
+@pytest.mark.asyncio
+async def test_resend_payment_webhook_no_callback_url_api(
+    client: AsyncClient, db_session: AsyncSession
+) -> None:
+    """Test resending webhook on a payment without callback_url raises 400."""
+    await _create_test_account(db_session, "No Callback Acc")
+
+    p_resp = await client.post(
+        "/api/v1/payments/",
+        json={
+            "client_user_id": "test_no_cb_user",
+            "scenario_id": "mock_bot",
+            "amount": "50.00",
+        },
+    )
+    assert p_resp.status_code == 201
+    payment_id = p_resp.json()["id"]
+
+    resend_resp = await client.post(f"/api/v1/payments/{payment_id}/webhook/resend")
+    assert resend_resp.status_code == 400
+    err_data = resend_resp.json()
+    assert err_data["error"]["code"] == "NO_CALLBACK_URL"
